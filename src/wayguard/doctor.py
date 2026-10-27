@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from wayguard import command, config
+from wayguard import claude_guard, command, config
 from wayguard import policy as policy_mod
 from wayguard.command import TRUSTED_SSH_PATHS
 
@@ -63,6 +63,23 @@ def _resolvable(ssh: str, alias: str) -> bool:
     return r.returncode == 0
 
 
+def _check_claude_guard(out: Callable[[str], None]) -> None:
+    """Advisory only: other MCP clients need their own equivalent (README §3.10)."""
+    if not claude_guard.claude_dir().is_dir():
+        out("skip claude guard: Claude Code not detected")
+        return
+    try:
+        st = claude_guard.status(claude_guard.settings_path())
+    except claude_guard.GuardConfigError:
+        out("WARN claude guard: Claude Code settings.json is unreadable")
+        return
+    if st.ok:
+        out("ok   claude guard: direct ssh is blocked in Claude Code")
+    else:
+        out("WARN claude guard: not (fully) installed; agents can bypass WayGuard with ssh. "
+            "Run `wayguard-mcp claude-guard install`")  # fmt: skip
+
+
 def run_doctor(
     root: Path,
     *,
@@ -108,6 +125,7 @@ def run_doctor(
             ok = _resolvable(ssh, server.ssh_alias)
             out(f"ok   server {sid}: resolvable: yes" if ok
                 else f"WARN server {sid}: resolvable: no")  # fmt: skip
+    _check_claude_guard(out)
     out("doctor: all checks passed" if code == EXIT_OK else "doctor: problems found")
     return code
 

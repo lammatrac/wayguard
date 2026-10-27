@@ -19,7 +19,8 @@ Requires macOS or Linux, Python 3.11+, the OpenSSH client (`ssh`), and [`uv`](ht
 # From a trusted clone of this repository
 uv tool install .
 
-# Create ~/.config/wayguard/ with a restrictive sample policy, then check the setup
+# Create ~/.config/wayguard/ with a restrictive sample policy and, when Claude Code is
+# installed, block its direct ssh/scp/sftp access (Section 3.10); then check the setup
 wayguard-mcp init
 wayguard-mcp doctor
 
@@ -41,13 +42,14 @@ Then edit `~/.config/wayguard/policy.json` by hand to add your SSH aliases and r
 | `~/.config/wayguard/audit.jsonl` (mode `0600`) | first audited tool call | Metadata-only audit log; raw command output is not recorded. |
 | `~/.config/wayguard/proposals/` (mode `0700`) | `init` / `propose_action` | Inert, non-executable action proposals written by agents. |
 | `~/.config/wayguard/state/` (mode `0700`) | `init` / runtime | Lock files (`audit.lock`, `proposals.lock`). |
+| `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`) | `init` / `claude-guard install`, only when Claude Code is installed | A `PreToolUse` hook on `Bash` that runs `wayguard-mcp hook claude-pretooluse`, plus `permissions.deny` rules for `ssh`, `scp`, `sftp` and `sshpass`. Everything else in the file is kept; the previous version is saved as `settings.json.wayguard-bak-<timestamp>`. Skip with `init --no-claude-guard`. |
 | Agent client config (e.g. `~/.claude.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`, `~/.cursor/mcp.json`) | you / `claude mcp add` | One `wayguard` MCP server entry that runs `wayguard-mcp serve`. |
 
 What it does **not** change: it installs no system packages, background daemons, or services; it opens no network port (the agent starts it as a stdio child process); and it does not modify `~/.ssh/config`, `known_hosts`, SSH keys, or anything on remote servers. SSH aliases, identities, and host keys are set up by you (Sections 3.3–3.4).
 
 ### How to use
 
-1. **Prepare SSH (once per server).** Create a dedicated key and remote account, add an alias to `~/.ssh/config` (e.g. `waytech-prod-debug`), and confirm `ssh waytech-prod-debug` connects with a verified host key (Sections 3.3–3.4).
+1. **Prepare SSH (once per server).** Create a dedicated key and remote account, add an alias to `~/.ssh/config` (e.g. `waytech-prod-debug`), and confirm `ssh waytech-prod-debug` connects with a verified host key (Sections 3.3–3.4). Run this in your own terminal: once the guard is installed, Claude Code refuses direct `ssh`.
 2. **Allow actions (human only).** Edit `~/.config/wayguard/policy.json` and map a server ID to that alias with one or more named actions. Each action fixes the executable, arguments, and paths; the agent can only fill declared, bounded parameters (full example in Section 3.6):
 
    ```json
@@ -88,7 +90,7 @@ The agent sees five tools:
 
 When the agent needs a diagnostic that is not allowed, it files a proposal. Review it with `wayguard-mcp proposals list` / `proposals show <ID>`; if appropriate, add a bounded action to the policy by hand, validate, restart the agent, and run `proposals mark-done <ID>` (or `proposals dismiss <ID>`). See Section 3.9.
 
-Day-to-day commands: `wayguard-mcp doctor` (health check, including whether each alias resolves), `wayguard-mcp audit tail --limit 20` (what was run; metadata only), `wayguard-mcp audit prune --older-than 30`. If every call returns `denied` with `policy_invalid`, the policy is missing, invalid, or has unsafe permissions; `doctor` or `get_policy_status` explains why. For production, also block the agent's direct `ssh` access (Section 3.10), or it can bypass WayGuard.
+Day-to-day commands: `wayguard-mcp doctor` (health check, including whether each alias resolves), `wayguard-mcp audit tail --limit 20` (what was run; metadata only), `wayguard-mcp audit prune --older-than 30`. If every call returns `denied` with `policy_invalid`, the policy is missing, invalid, or has unsafe permissions; `doctor` or `get_policy_status` explains why. `init` blocks direct `ssh` in Claude Code automatically (Section 3.10); `wayguard-mcp claude-guard status` checks it and `claude-guard install` re-applies it (for example after upgrading or moving the install). Other clients need their own equivalent, or the agent can bypass WayGuard.
 
 ### Uninstall
 
@@ -96,10 +98,14 @@ Day-to-day commands: `wayguard-mcp doctor` (health check, including whether each
 # 1. Remove the MCP entry from each agent client (Claude Code shown), then restart the client
 claude mcp remove wayguard --scope user
 
-# 2. Remove the package and its console command
+# 2. Remove the direct-ssh guard from Claude Code settings (do this before step 3,
+#    while the command still exists)
+wayguard-mcp claude-guard uninstall
+
+# 3. Remove the package and its console command
 uv tool uninstall wayguard-mcp
 
-# 3. Optional: remove local policy, proposals, and audit metadata.
+# 4. Optional: remove local policy, proposals, and audit metadata.
 #    Keep audit.jsonl first if you may need it for incident review.
 rm -rf ~/.config/wayguard
 ```
@@ -390,7 +396,9 @@ The package must install this executable:
 
 ```text
 wayguard-mcp serve
-wayguard-mcp init [--force]
+wayguard-mcp init [--force] [--no-claude-guard]
+wayguard-mcp claude-guard install|uninstall|status
+wayguard-mcp hook claude-pretooluse
 wayguard-mcp doctor
 wayguard-mcp policy validate
 wayguard-mcp actions list [--server SERVER_ID]
@@ -405,7 +413,9 @@ wayguard-mcp audit prune --older-than DAYS
 Required behavior:
 
 - `serve`: starts the stdio MCP server; stdout is protocol-only.
-- `init`: creates the configuration directory and a restrictive example policy. It must not add real servers or permissions automatically.
+- `init`: creates the configuration directory and a restrictive example policy. It must not add real servers or permissions automatically. When Claude Code is installed (its config directory exists) and `--no-claude-guard` is not given, it also performs `claude-guard install`, even when the policy already exists.
+- `claude-guard install`: idempotently adds the direct-SSH `PreToolUse` hook and deny rules to Claude Code's user `settings.json`, preserving every other setting and saving a timestamped backup when it changes the file. Refuses to touch an invalid JSON file. `uninstall` removes exactly what `install` added; `status` exits 0 only when the hook (pointing at this install) and all deny rules are present.
+- `hook claude-pretooluse`: the hook itself; reads Claude Code's hook JSON from stdin and denies Bash commands that reach a remote host. Fails closed on malformed input.
 - `doctor`: checks the Python version, the trusted OpenSSH binary, configuration paths and modes, and policy validity, entirely offline. For each configured alias it runs `ssh -G` and reports only `resolvable: yes/no` (the output of `ssh -G` is discarded, never printed or logged). Exit code is 0 when all checks pass.
 - `policy validate`: validates schema and semantic/security constraints without executing remote operations.
 - `actions list`: displays actions configured by the human.
@@ -792,7 +802,20 @@ Do not paste a raw shell string from the proposal into policy as an executable c
 
 MCP registration does **not** block an agent's built-in terminal tool from executing `ssh` directly. Configure the client separately if you want to prevent that common bypass.
 
-- For Claude Code, use permissions and a `PreToolUse` hook to reject direct `ssh`, `scp`, and `sftp` calls while allowing the reviewed MCP tools. Test the hook against quoting, absolute executable paths, shell wrappers, and chained commands; a regular-expression hook is a defense-in-depth measure, not a complete shell parser.
+- For Claude Code, `wayguard-mcp init` (or `wayguard-mcp claude-guard install`) adds this to `~/.claude/settings.json`:
+
+  ```json
+  {
+    "permissions": { "deny": ["Bash(ssh *)", "Bash(scp *)", "Bash(sftp *)", "Bash(sshpass *)", "Bash(ssh.exe *)", "Bash(scp.exe *)"] },
+    "hooks": {
+      "PreToolUse": [
+        { "matcher": "Bash", "hooks": [{ "type": "command", "command": "<wayguard python> -m wayguard hook claude-pretooluse", "timeout": 10 }] }
+      ]
+    }
+  }
+  ```
+
+  The deny rules only match commands that start with the program. The hook tokenizes the whole command line and denies, with a message pointing the agent to `list_servers` / `run_action` / `propose_action`: `ssh`, `scp`, `sftp`, `sshpass`, `autossh`, `mosh`, `pssh`, `pdsh`, `sshfs`, `ansible` and similar (also as absolute paths, `.exe` on WSL, or quoted); the same inside `&&`/`;`/`|` chains, loops, `$(…)`, backticks, `bash -c`, `eval`, and wrappers such as `sudo`, `env`, `timeout`, `xargs` and `watch`; `rsync` to a host or with `-e`; `docker`/`podman` against a remote engine (`-H`, `--context`, `DOCKER_HOST`); `GIT_SSH_COMMAND` and `core.sshCommand` overrides; `gcloud`/`doctl`/`az` ssh and `aws ssm` sessions; and SSH libraries such as `paramiko` in inline scripts. Unparseable input or an internal error is denied. It is still defense in depth, not a complete shell parser: a script file written to disk and then executed, or a program invoked through a variable built at run time, can get past it. Restart Claude Code sessions after installing it.
 - For Codex, Gemini CLI, Cursor, and other clients, review the current native command permissions, hooks, and sandboxing options. Do not assume that a Claude Code hook applies to other clients.
 - Do not give the agent an unrestricted production SSH key and rely only on an instruction in `CLAUDE.md`, `AGENTS.md`, or another prompt file. Prompt instructions are not enforcement.
 - For stronger assurance, use a dedicated key restricted by the remote server to an administrator-maintained gateway that supports only the reviewed diagnostic actions.
@@ -831,7 +854,7 @@ Stop. Verify the host identity through a trusted channel and investigate the rea
 
 ## 3.12 Uninstalling or revoking access
 
-1. Remove the MCP server entry from each agent client configuration and restart the client.
+1. Remove the MCP server entry from each agent client configuration, run `wayguard-mcp claude-guard uninstall` to remove the Claude Code hook and deny rules, and restart the client.
 2. Remove or disable the server/actions from the human-maintained policy, then validate it.
 3. Revoke the dedicated public key from the remote account or remove the forced-command authorization through the server administrator if that identity should no longer be used.
 4. Remove local policy, proposals, and audit files only after deciding whether they are needed for incident review. Securely retain or delete audit metadata according to your retention policy.

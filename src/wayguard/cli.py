@@ -1,11 +1,11 @@
-"""Command-line entry point. Later phases add serve, doctor, audit, proposals."""
+"""Command-line entry point."""
 
 import argparse
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from wayguard import __version__, audit, config, doctor, proposals
+from wayguard import __version__, audit, claude_guard, config, doctor, proposals
 from wayguard import policy as policy_mod
 from wayguard.config import default_root
 
@@ -38,6 +38,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="create the config layout and a sample policy")
     init.add_argument("--force", action="store_true", help="overwrite policy (keeps a backup)")
+    init.add_argument("--no-claude-guard", action="store_true",
+                      help="do not block direct ssh in Claude Code settings")  # fmt: skip
+
+    guard = sub.add_parser("claude-guard", help="block direct ssh in Claude Code (settings.json)")
+    guard_sub = guard.add_subparsers(dest="guard_command", required=True)
+    guard_sub.add_parser("install", help="add the PreToolUse hook and deny rules (idempotent)")
+    guard_sub.add_parser("uninstall", help="remove what install added")
+    guard_sub.add_parser("status", help="report whether the guard is installed")
+
+    hk = sub.add_parser("hook", help="agent hook entry points (called by the agent, not you)")
+    hk.add_argument("hook_name", choices=[claude_guard.HOOK_SUBCOMMAND])
 
     pol = sub.add_parser("policy", help="policy tools")
     pol_sub = pol.add_subparsers(dest="policy_command", required=True)
@@ -86,9 +97,48 @@ def _err(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def _cmd_init(force: bool) -> int:
+def _install_claude_guard() -> int:
+    if not claude_guard.claude_dir().is_dir():
+        print("Claude Code not detected; skipped the direct-ssh guard "
+              "(run `wayguard-mcp claude-guard install` after installing it)")  # fmt: skip
+        return EXIT_OK
+    return _cmd_claude_guard("install")
+
+
+def _cmd_claude_guard(cmd: str) -> int:
+    path = claude_guard.settings_path()
+    try:
+        if cmd == "status":
+            st = claude_guard.status(path)
+            if st.ok:
+                print(f"claude guard: installed in {path}")
+                return EXIT_OK
+            if not st.hook:
+                print("claude guard: hook missing")
+            elif not st.current_path:
+                print("claude guard: hook points at another wayguard install")
+            for rule in st.missing_rules:
+                print(f"claude guard: deny rule missing: {rule}")
+            print("run `wayguard-mcp claude-guard install`")
+            return EXIT_DENIED
+        change = (claude_guard.install if cmd == "install" else claude_guard.uninstall)(path)
+    except claude_guard.GuardConfigError as e:
+        _err(f"claude guard: {e}")
+        return EXIT_OPERATIONAL
+    verb = "installed in" if cmd == "install" else "removed from"
+    print(f"claude guard: {verb} {path}" if change.changed
+          else f"claude guard: {path} already up to date")  # fmt: skip
+    if change.backup is not None:
+        print(f"claude guard: previous settings saved to {change.backup}")
+    if change.changed:
+        print("claude guard: restart Claude Code sessions to apply")
+    return EXIT_OK
+
+
+def _cmd_init(force: bool, guard: bool) -> int:
     root = default_root()
     config.ensure_layout(root)
+    guard_code = _install_claude_guard() if guard else EXIT_OK
     path = config.policy_path(root)
     if path.exists() or path.is_symlink():
         if not force:
@@ -98,7 +148,7 @@ def _cmd_init(force: bool) -> int:
         config.atomic_write(path.with_name(f"policy.json.bak-{stamp}"), path.read_bytes())
     config.atomic_write(path, SAMPLE_POLICY)
     print(f"initialized {root}")
-    return EXIT_OK
+    return guard_code
 
 
 def _load() -> tuple[policy_mod.Policy | None, int]:
@@ -191,8 +241,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return mcp_server.serve(default_root())
         if args.command == "doctor":
             return doctor.run_doctor(default_root())
+        if args.command == "hook":
+            return claude_guard.run_hook(sys.stdin, sys.stdout, sys.stderr)
         if args.command == "init":
-            return _cmd_init(args.force)
+            return _cmd_init(args.force, not args.no_claude_guard)
+        if args.command == "claude-guard":
+            return _cmd_claude_guard(args.guard_command)
         if args.command == "policy":
             return _cmd_validate()
         if args.command == "actions":

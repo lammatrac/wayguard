@@ -66,12 +66,23 @@ def _parameters_schema(policy: policy_mod.Policy | None) -> dict[str, Any]:
     return {"anyOf": [one(n) for n in sorted(sets)]}
 
 
+INSTRUCTIONS = (
+    "WayGuard is the approved way to inspect remote servers (logs, service status, "
+    "containers, disk). Do not run ssh, scp, sftp, rsync or docker against remote hosts "
+    "from a shell: call list_servers, then list_actions, then run_action. If no action "
+    "fits, call propose_action and tell the user; never fall back to direct SSH."
+)
+
+
 def tool_definitions(policy: policy_mod.Policy | None = None) -> list[types.Tool]:
     sid = {"type": "string", "minLength": 1, "maxLength": 256}
     return [
         types.Tool(
             name="list_servers",
-            description="List enabled servers (id, optional description, action count).",
+            description=(
+                "List enabled servers (id, optional description, action count). Start here "
+                "for any remote server diagnostic instead of running ssh in a shell."
+            ),
             inputSchema=_obj({}, []),
         ),
         types.Tool(
@@ -365,7 +376,7 @@ class WayguardService:
 
 def create_server(root: Path, *, ssh_path: str | None = None) -> "Server[Any]":
     svc = WayguardService(root, ssh_path=ssh_path)
-    server: Server[Any] = Server("wayguard-mcp", version=__version__)
+    server: Server[Any] = Server("wayguard-mcp", version=__version__, instructions=INSTRUCTIONS)
 
     @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
     async def _list() -> list[types.Tool]:
