@@ -9,6 +9,58 @@ WayGuard MCP is a **local, user-scoped MCP server** that lets AI coding agents i
 
 The same MCP server should work with MCP-capable clients such as Claude Code, Codex, Gemini CLI, and Cursor. Client configuration is different per host; the server, policy format, and action semantics should remain client-neutral.
 
+## Quick start: install, uninstall, and what changes on your machine
+
+### Install
+
+Requires macOS or Linux, Python 3.11+, the OpenSSH client (`ssh`), and [`uv`](https://docs.astral.sh/uv/getting-started/installation/). No root access is needed.
+
+```bash
+# From a trusted clone of this repository
+uv tool install .
+
+# Create ~/.config/wayguard/ with a restrictive sample policy, then check the setup
+wayguard-mcp init
+wayguard-mcp doctor
+
+# Register with your agent (Claude Code shown; see Section 3.7 for Codex, Gemini CLI, Cursor)
+claude mcp add wayguard --scope user -- wayguard-mcp serve
+claude mcp list
+```
+
+Then edit `~/.config/wayguard/policy.json` by hand to add your SSH aliases and read-only actions (Section 3.6), and run `wayguard-mcp policy validate`. The sample policy grants nothing until you do.
+
+### What changes on your computer
+
+| Location | Created by | Contents |
+| --- | --- | --- |
+| `~/.local/share/uv/tools/wayguard-mcp/` | `uv tool install` | Isolated Python environment holding the package and its dependency (`mcp`). |
+| `~/.local/bin/wayguard-mcp` | `uv tool install` | Console command (a link into the environment above). |
+| `~/.config/wayguard/` (mode `0700`) | `wayguard-mcp init` | User-scoped configuration root. |
+| `~/.config/wayguard/policy.json` (mode `0600`) | `wayguard-mcp init` | Human-maintained allowlist. `init --force` keeps a backup of the previous file. |
+| `~/.config/wayguard/audit.jsonl` (mode `0600`) | first audited tool call | Metadata-only audit log; raw command output is not recorded. |
+| `~/.config/wayguard/proposals/` (mode `0700`) | `init` / `propose_action` | Inert, non-executable action proposals written by agents. |
+| `~/.config/wayguard/state/` (mode `0700`) | `init` / runtime | Lock files (`audit.lock`, `proposals.lock`). |
+| Agent client config (e.g. `~/.claude.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`, `~/.cursor/mcp.json`) | you / `claude mcp add` | One `wayguard` MCP server entry that runs `wayguard-mcp serve`. |
+
+What it does **not** change: it installs no system packages, background daemons, or services; it opens no network port (the agent starts it as a stdio child process); and it does not modify `~/.ssh/config`, `known_hosts`, SSH keys, or anything on remote servers. SSH aliases, identities, and host keys are set up by you (Sections 3.3–3.4).
+
+### Uninstall
+
+```bash
+# 1. Remove the MCP entry from each agent client (Claude Code shown), then restart the client
+claude mcp remove wayguard --scope user
+
+# 2. Remove the package and its console command
+uv tool uninstall wayguard-mcp
+
+# 3. Optional: remove local policy, proposals, and audit metadata.
+#    Keep audit.jsonl first if you may need it for incident review.
+rm -rf ~/.config/wayguard
+```
+
+Uninstalling does not revoke access on remote servers. Remove the dedicated public key or forced-command entry from the remote account separately (Section 3.12).
+
 ## Security model at a glance
 
 - **Default deny:** an unknown server, action, parameter, or configuration field is rejected.
