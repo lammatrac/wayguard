@@ -106,7 +106,7 @@ def test_status_valid_and_enforcement(tmp_path: Path) -> None:
     assert st["validation"] == "valid" and st["errors"] == []
     assert st["enforcement"] == "local-policy-only"
     assert st["policy_changed_since_load"] is False
-    assert st["schema_version"] == 2 and st["loaded_at"]
+    assert st["schema_version"] == 1 and st["loaded_at"]
 
 
 def test_list_actions_denies_unknown_and_disabled(tmp_path: Path) -> None:

@@ -24,7 +24,7 @@ from wayguard.validation import RequestDenied
 log = logging.getLogger("wayguard")
 
 ENFORCEMENT = "local-policy-only"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 TOOL_NAMES = ("list_servers", "list_actions", "run_action", "propose_action", "get_policy_status")
 PERMISSION_ERRORS = ["policy: file is missing, unreadable or has unsafe permissions"]
 
