@@ -115,9 +115,7 @@ def test_policy_check_refuses_group_or_other_writable(tmp_path: Path, bad: int) 
         config.check_policy_file(p, root)
 
 
-def test_policy_check_refuses_wrong_owner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_policy_check_refuses_wrong_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "wg"
     p = _policy(root)
     monkeypatch.setattr(os, "getuid", lambda: os.stat(p).st_uid + 1)

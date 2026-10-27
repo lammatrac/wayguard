@@ -743,3 +743,13 @@ Removing the MCP configuration does not revoke an SSH key on a server. Revoke th
 - [OpenAI Codex MCP documentation](https://developers.openai.com/codex/mcp)
 - [Gemini CLI MCP server documentation](https://geminicli.com/docs/tools/mcp-server/)
 - [Cursor MCP documentation](https://cursor.com/docs/mcp)
+
+## CLI exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | internal error (unexpected exception; no details printed) |
+| 2 | invalid policy (argparse usage errors also exit 2) |
+| 3 | denied (policy permission refusal or missing policy, unknown server) |
+| 4 | operational error (I/O failure, `init` refusing to overwrite without `--force`) |
