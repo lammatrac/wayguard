@@ -5,7 +5,7 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from wayguard import __version__, audit, config, proposals
+from wayguard import __version__, audit, config, doctor, proposals
 from wayguard import policy as policy_mod
 from wayguard.config import default_root
 
@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     lst = act_sub.add_parser("list", help="list configured actions (no ssh aliases shown)")
     lst.add_argument("--server", metavar="ID", default=None)
 
+    sub.add_parser("doctor", help="check python, ssh, paths, modes, policy (offline)")
     sub.add_parser("serve", help="run the MCP server on stdio")
 
     aud = sub.add_parser("audit", help="audit log tools")
@@ -188,6 +189,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             from wayguard import mcp_server  # lazy: keep other commands import-light
 
             return mcp_server.serve(default_root())
+        if args.command == "doctor":
+            return doctor.run_doctor(default_root())
         if args.command == "init":
             return _cmd_init(args.force)
         if args.command == "policy":

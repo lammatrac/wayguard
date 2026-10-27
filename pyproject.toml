@@ -27,6 +27,8 @@ packages = ["src/wayguard"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m \"not e2e\""
+markers = ["e2e: end-to-end test against a disposable Docker sshd (run with -m e2e)"]
 
 [tool.ruff]
 line-length = 100

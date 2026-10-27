@@ -139,7 +139,7 @@ The implementation should be modular, with at least these components:
 - `redaction`: conservative secret-pattern redaction.
 - `audit`: append-only metadata logging with restrictive permissions.
 - `proposals`: create/list/show proposals; no execution or approval in MCP.
-- `cli`: `serve`, `init`, `doctor`, `policy validate`, `actions list`, `proposals list/show`, and `audit` operations.
+- `cli`: `serve`, `init`, `doctor`, `policy validate`, `actions list`, `proposals list/show/dismiss/mark-done`, and `audit tail/prune` operations.
 - `mcp_server`: register the client-neutral tool surface.
 
 Pin supported dependency ranges and commit a lock file. Do not execute network-fetched code or auto-install dependencies at server startup. Do not use `shell=True` for local process creation. All external processes must use explicit argument arrays.
@@ -182,6 +182,7 @@ Use JSON for v1. Version the schema and reject unknown fields by default to prev
     "waytech-prod": {
       "enabled": true,
       "ssh_alias": "waytech-prod-debug",
+      "description": "Production web server (optional, at most 200 characters)",
       "actions": {
         "nginx_error_tail": {
           "description": "Read the last N lines from the Nginx error log",
@@ -212,13 +213,15 @@ Use JSON for v1. Version the schema and reject unknown fields by default to prev
 Policy semantics:
 
 - `servers` keys and action keys are stable identifiers matching a conservative pattern such as `[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}`.
+- `description` on a server is optional (at most 200 characters) and is returned by `list_servers`.
 - `ssh_alias` must be a single valid alias string. It must not start with `-`, contain whitespace, or contain command syntax. MCP input must never override it.
 - `executable` must be an absolute path on the **remote** host and must pass policy validation. v1 must reject known command interpreters and shells (including `sh`, `bash`, `zsh`, `dash`, `python`, `perl`, `ruby`, `node`, `env`, `sudo`, `su`, and `busybox`) as action executables by default. An exception must require a documented security review and must not be selectable by agent input.
 - `args` is an array of individual argument strings—not a shell command. Placeholders must occupy a complete argument, such as `{lines}`; embedded interpolation like `--lines={lines}` is disallowed in v1. Reject unknown placeholders. No agent input may add, remove, or reorder argument positions.
-- Supported parameter types in v1: `integer` with minimum/maximum, `enum` with a fixed list, and `string` with maximum length plus an allowlist pattern. If a type or constraint is omitted where required, reject the action.
+- Supported parameter types in v1: `integer` with minimum/maximum (`minimum` must be 0 or greater; a negative minimum is rejected so a value can never look like an option flag), `enum` with a fixed list, and `string` with maximum length plus an allowlist pattern. If a type or constraint is omitted where required, reject the action.
 - Do not support a `raw`, `shell`, `command`, `script`, or `args_extra` parameter.
 - Do not permit action parameters to choose a file path unless the value is selected from a human-maintained enum of exact paths. Prefer fixed paths in policy.
 - Set action-specific timeout and output caps only within globally defined maximums. A policy entry cannot disable the global timeout or output cap.
+- Hard ceilings are constants in the code and cannot be raised by policy or by MCP input: timeout 120 s, 256 KiB and 2,000 lines per output stream, and 8 concurrent actions. Policy values above a ceiling are rejected at load.
 - Action description text is displayed as metadata and never interpreted as executable instructions.
 - `risk` must be `read-only` in v1. The validator rejects other risk classes.
 
@@ -268,6 +271,8 @@ Behavior:
 8. Prefix remote output with a warning that it is untrusted diagnostic data and may contain arbitrary text. Do not treat output as instructions.
 9. Audit the outcome without retaining raw output by default.
 
+Every result carries `status`, one of `ok`, `nonzero_exit`, `timeout`, `denied`, `busy`, `host_key_error`, `auth_error`, `unreachable`, `unknown_alias`, `ssh_error`, `internal_error` (the MCP `isError` flag stays false, so always check `status`). `busy` means the concurrency limit was reached; retry later. `denied` and `busy` results carry `reason_code` and `reason`. `cancelled` appears only in the audit log, when the client cancels a running call (the SSH process group is terminated first).
+
 ### `propose_action`
 
 Input fields: `server_id`, `goal`, `reason`, and optional `suggested_action_summary` (plain text, bounded length). It may save a proposal record and return a proposal ID. It must not execute any command, create policy entries, or approve the proposal. It should discourage raw shell command text and instead ask for the desired diagnostic result, expected source, and parameter constraints.
@@ -278,6 +283,8 @@ Proposal records must be inert data. Never load a proposal as policy or execute 
 
 No arguments. Returns policy schema version, validation status, load time, and whether enforcement is `local-policy-only` or a separately configured remote-gateway mode. It must not return secrets or full configuration content.
 
+Fields: `schema_version` (1), `validation` (`valid` or `invalid`), `errors` (sanitized `"<json.path>: <reason>"` strings, empty when valid), `loaded_at` (UTC timestamp or `null`), `policy_changed_since_load` (true if the policy file changed on disk since this server loaded it; restart the server to apply changes) and `enforcement` (always `local-policy-only` in v1). If the policy is missing, unreadable, has unsafe permissions or fails validation at startup, the server runs in **deny-all mode**: it still starts, `list_servers` is empty, every `run_action` is denied with `policy_invalid`, and `get_policy_status` reports why. `propose_action` still works.
+
 Do not expose policy editing, approval, command execution by string, arbitrary file read, or raw SSH tools through MCP.
 
 ## 2.6 CLI interface
@@ -286,24 +293,27 @@ The package must install this executable:
 
 ```text
 wayguard-mcp serve
-wayguard-mcp init
+wayguard-mcp init [--force]
 wayguard-mcp doctor
 wayguard-mcp policy validate
 wayguard-mcp actions list [--server SERVER_ID]
-wayguard-mcp proposals list
+wayguard-mcp proposals list [--all]
 wayguard-mcp proposals show PROPOSAL_ID
+wayguard-mcp proposals dismiss PROPOSAL_ID
+wayguard-mcp proposals mark-done PROPOSAL_ID
 wayguard-mcp audit tail [--limit N]
+wayguard-mcp audit prune --older-than DAYS
 ```
 
 Required behavior:
 
 - `serve`: starts the stdio MCP server; stdout is protocol-only.
 - `init`: creates the configuration directory and a restrictive example policy. It must not add real servers or permissions automatically.
-- `doctor`: checks Python/runtime, OpenSSH availability, configuration paths and permissions, JSON validity, and policy consistency. It may report whether an alias is resolvable without exposing the underlying private config.
+- `doctor`: checks the Python version, the trusted OpenSSH binary, configuration paths and modes, and policy validity, entirely offline. For each configured alias it runs `ssh -G` and reports only `resolvable: yes/no` (the output of `ssh -G` is discarded, never printed or logged). Exit code is 0 when all checks pass.
 - `policy validate`: validates schema and semantic/security constraints without executing remote operations.
 - `actions list`: displays actions configured by the human.
-- `proposals list/show`: displays pending proposals for human review only.
-- `audit tail`: displays metadata. Raw command output is not recorded by default.
+- `proposals list/show/dismiss/mark-done`: human review only. `list` shows pending proposals (`--all` also shows dismissed and done ones); `dismiss` and `mark-done` are terminal. These are not available through MCP.
+- `audit tail`: displays metadata. Raw command output is not recorded by default. `audit prune --older-than DAYS` (DAYS at least 1) removes older lines and prints how many were removed.
 
 Exit codes must distinguish success, invalid policy, denied action, operational error, and internal error. Error messages must be useful but must not disclose secrets, environment variables, private key paths unless explicitly requested by the local human CLI, or raw SSH config.
 
@@ -577,6 +587,8 @@ claude mcp list
 
 Then open Claude Code and run `/mcp` to verify that the server is connected. The `--scope user` setting makes it available across your Claude Code projects for that operating-system user. Review the exact local MCP server command before approving it.
 
+Note: these client snippets follow each client's documentation but have not been exercised against live clients by this repository's automated tests (only the stdio server is, through the MCP SDK and a Docker sshd). Verify them against current client documentation.
+
 Official reference: [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
 
 ### OpenAI Codex
@@ -584,7 +596,7 @@ Official reference: [Claude Code MCP documentation](https://code.claude.com/docs
 Edit `~/.codex/config.toml` and add:
 
 ```toml
-[mcp_servers.ssh_guard]
+[mcp_servers.wayguard]
 command = "wayguard-mcp"
 args = ["serve"]
 startup_timeout_sec = 10
@@ -751,5 +763,5 @@ Removing the MCP configuration does not revoke an SSH key on a server. Revoke th
 | 0 | success |
 | 1 | internal error (unexpected exception; no details printed) |
 | 2 | invalid policy (argparse usage errors also exit 2) |
-| 3 | denied (policy permission refusal or missing policy, unknown server) |
-| 4 | operational error (I/O failure, `init` refusing to overwrite without `--force`) |
+| 3 | denied (policy permission refusal or missing policy, unknown server, malformed or unknown proposal ID) |
+| 4 | operational error (I/O failure, `init` refusing to overwrite without `--force`, changing an already dismissed/done proposal, `doctor` finding a missing ssh binary or bad modes) |
