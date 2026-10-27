@@ -485,6 +485,22 @@ def test_substituted_text_not_rescanned() -> None:
     assert any("stray brace" in x for x in errors_of(d))
 
 
+@pytest.mark.parametrize("arg", ["{${x}}", "pre{${x}}", "${x}}", "{${x}/log"])
+def test_literal_brace_around_var_rejected(arg: str) -> None:
+    d = good()
+    set_vars(d, x="lines")
+    action(d)["args"][1] = arg
+    assert errors_of(d) == ["projects.prod.actions.tail.args[1]: stray brace around variable"]
+
+
+@pytest.mark.parametrize("arg,out", [("${x}", "/srv"), ("/srv/${x}/log", "/srv//srv/log")])
+def test_var_without_literal_braces_accepted(arg: str, out: str) -> None:
+    d = good()
+    set_vars(d, x="/srv")
+    action(d)["args"][3] = arg
+    assert parse_policy(dump(d)).servers["prod"].actions["tail"].args[3] == out
+
+
 def test_unused_vars_accepted() -> None:
     d = good()
     d["hosts"]["prod-host"]["vars"] = {"h": "x"}

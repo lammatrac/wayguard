@@ -639,6 +639,11 @@ def _resolve_action(
 
 def _substitute(arg: str, scope: _VarScope, path: str, errs: _Errors) -> str:
     """Replace each `${var}` with a string variable in one pass (no re-scan)."""
+    # A literal brace next to a reference (e.g. "{${x}}") would let a variable select
+    # an agent `{param}` placeholder, so braces may only belong to `${...}` here.
+    if VAR_REF_RE.search(arg) and any(c in VAR_REF_RE.sub("", arg) for c in "{}"):
+        errs.add(path, "stray brace around variable")
+        return arg
 
     def one(m: re.Match[str]) -> str:
         var = m.group(1)
