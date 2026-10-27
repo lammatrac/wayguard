@@ -68,9 +68,10 @@ def _parameters_schema(policy: policy_mod.Policy | None) -> dict[str, Any]:
 
 INSTRUCTIONS = (
     "WayGuard is the approved way to inspect remote servers (logs, service status, "
-    "containers, disk). Do not run ssh, scp, sftp, rsync or docker against remote hosts "
-    "from a shell: call list_servers, then list_actions, then run_action. If no action "
-    "fits, call propose_action and tell the user; never fall back to direct SSH."
+    "containers, disk). Each entry from list_servers is a project on a server. Do not run "
+    "ssh, scp, sftp, rsync or docker against remote hosts from a shell: call list_servers, "
+    "then list_actions, then run_action. If no action fits, call propose_action and tell "
+    "the user; never fall back to direct SSH."
 )
 
 
@@ -80,14 +81,18 @@ def tool_definitions(policy: policy_mod.Policy | None = None) -> list[types.Tool
         types.Tool(
             name="list_servers",
             description=(
-                "List enabled servers (id, optional description, action count). Start here "
-                "for any remote server diagnostic instead of running ssh in a shell."
+                "List enabled projects (id, optional description, action count); each "
+                "project lives on a server. Start here for any remote server diagnostic "
+                "instead of running ssh in a shell."
             ),
             inputSchema=_obj({}, []),
         ),
         types.Tool(
             name="list_actions",
-            description="List the pre-approved read-only actions of one server.",
+            description=(
+                "List the pre-approved read-only actions of one project (including its "
+                "server's actions)."
+            ),
             inputSchema=_obj({"server_id": sid}, ["server_id"]),
         ),
         types.Tool(

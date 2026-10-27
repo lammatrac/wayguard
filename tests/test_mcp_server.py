@@ -337,3 +337,8 @@ def test_serve_subprocess_stdout_hygiene(tmp_path: Path) -> None:
     assert status["validation"] == "valid"
     assert "wayguard-mcp serve" in err
     assert rc == 0
+
+
+def test_list_servers_description_mentions_projects() -> None:
+    tool = next(t for t in mcp_server.tool_definitions() if t.name == "list_servers")
+    assert "project" in (tool.description or "")

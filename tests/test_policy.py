@@ -971,7 +971,36 @@ def test_load_invalid_raises_invalid(tmp_path: Path) -> None:
         policy.load_policy(root)
 
 
-def test_starter_template_is_valid() -> None:
-    path = Path(__file__).resolve().parent.parent / "examples" / "policy.starter.json"
-    p = parse_policy(path.read_bytes())
-    assert not p.servers["web-prod"].enabled  # copied template grants nothing until enabled
+STARTER = Path(__file__).parents[1] / "examples" / "policy.starter.json"
+V1_CAPS = {
+    a: 65536
+    for a in (
+        "nginx_error_tail", "nginx_error_grep", "nginx_rotated_log_read", "nginx_config_test",
+        "apache_error_tail", "apache_php_fatal_grep", "apache_config_test", "apache_vhosts",
+        "php_fpm_error_tail", "php_fpm_slow_tail", "wordpress_debug_tail", "service_status",
+        "service_journal", "docker_ps", "docker_logs_tail", "docker_logs_since",
+        "docker_compose_logs", "docker_stats", "journal_errors", "kernel_oom_events",
+        "kernel_messages", "failed_services", "disk_usage", "disk_inodes", "memory_usage",
+        "load_average", "listening_ports",
+    )
+}  # fmt: skip
+V1_CAPS.update(
+    {
+        a: 32768
+        for a in (
+            "nginx_access_tail", "nginx_access_grep", "nginx_rotated_log_grep",
+            "apache_access_tail",
+        )
+    }
+)  # fmt: skip
+
+
+def test_starter_policy_is_valid_and_keeps_v1_limits() -> None:
+    p = parse_policy(STARTER.read_bytes())
+    found = {aid: a for s in p.servers.values() for aid, a in s.actions.items()}
+    for aid, cap in V1_CAPS.items():
+        assert found[aid].max_output_bytes == cap and found[aid].timeout_seconds == 20
+    w = found["docker_logs_window"]
+    assert w.max_output_bytes == 262144
+    assert w.parameters["since"].values == ("60m", "50m", "40m", "30m", "20m", "10m")
+    assert all(not s.enabled for s in p.servers.values())
