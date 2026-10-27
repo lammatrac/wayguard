@@ -140,6 +140,7 @@ def mutations() -> list[tuple[str, Any]]:
         ("int_float", f(lambda d: action(d)["parameters"]["lines"].update(minimum=1.5))),
         ("int_bool", f(lambda d: action(d)["parameters"]["lines"].update(minimum=True))),
         ("int_min_gt_max", f(lambda d: action(d)["parameters"]["lines"].update(minimum=300))),
+        ("int_negative_min", f(lambda d: action(d)["parameters"]["lines"].update(minimum=-5))),
         ("int_missing_max", f(lambda d: action(d)["parameters"]["lines"].pop("maximum"))),
         (
             "enum_empty",

@@ -259,6 +259,9 @@ def _parse_parameter(name: str, raw: object, path: str, errs: _Errors) -> Parame
         if lo > hi:
             errs.add(path, "minimum exceeds maximum")
             return None
+        if lo < 0:
+            errs.add(path, "minimum must not be negative")
+            return None
         return ParameterSpec(name, "integer", minimum=lo, maximum=hi)
     if ptype == "enum":
         vals = raw["values"]

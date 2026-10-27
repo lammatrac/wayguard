@@ -34,6 +34,7 @@ UNKNOWN_ACTION = "unknown_action"
 MISSING_PARAMETER = "missing_parameter"
 EXTRA_PARAMETER = "extra_parameter"
 INVALID_PARAMETER = "invalid_parameter"
+CONCURRENCY_LIMIT = "concurrency_limit"  # phase 4 gate; audited as denied by phase 6
 
 REASON_CODES: tuple[str, ...] = (
     POLICY_INVALID,
@@ -45,6 +46,7 @@ REASON_CODES: tuple[str, ...] = (
     MISSING_PARAMETER,
     EXTRA_PARAMETER,
     INVALID_PARAMETER,
+    CONCURRENCY_LIMIT,
 )
 
 REQUEST_FIELDS = frozenset({"server_id", "action_id", "parameters"})
