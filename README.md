@@ -50,7 +50,7 @@ What it does **not** change: it installs no system packages, background daemons,
 ### How to use
 
 1. **Prepare SSH (once per server).** Create a dedicated key and remote account, add an alias to `~/.ssh/config` (e.g. `waytech-prod-debug`), and confirm `ssh waytech-prod-debug` connects with a verified host key (Sections 3.3–3.4). Run this in your own terminal: once the guard is installed, Claude Code refuses direct `ssh`.
-2. **Allow actions (human only).** Edit `~/.config/wayguard/policy.json` and map a server ID to that alias with one or more named actions. Each action fixes the executable, arguments, and paths; the agent can only fill declared, bounded parameters (full example in Section 3.6):
+2. **Allow actions (human only).** Edit `~/.config/wayguard/policy.json` and define a host for that alias, then a project on it that uses templates or named actions. Each action fixes the executable, arguments, and paths; the agent can only fill declared, bounded parameters (full example in Section 3.6):
 
    ```json
    "nginx_error_tail": {
@@ -62,27 +62,27 @@ What it does **not** change: it installs no system packages, background daemons,
    }
    ```
 
-   **Starter template:** [`examples/policy.starter.json`](examples/policy.starter.json) contains 31 ready-made read-only actions for Nginx, Apache, PHP-FPM, WordPress, Docker, systemd/journald, and system health (disk, memory, load, ports, OOM events). To use it:
+   **Starter template:** [`examples/policy.starter.json`](examples/policy.starter.json) is a v2 policy with six templates (`host-basics`, `nginx`, `apache`, `php-fpm`, `docker-app`, `wordpress`) holding 32 ready-made read-only actions for Nginx, Apache, PHP-FPM, WordPress, Docker, systemd/journald, and system health (disk, memory, load, ports, OOM events). To use it:
 
    ```bash
    cp ~/.config/wayguard/policy.json ~/.config/wayguard/policy.json.bak   # if you already have one
    install -m 600 examples/policy.starter.json ~/.config/wayguard/policy.json
    ```
 
-   Then edit it: set `ssh_alias` to your alias, rename `web-prod` and write a `description` that names your project, delete the action groups you do not run, adjust paths (PHP version, site root, compose file, RHEL `httpd` paths) and enum values (systemd units, container and service names), and set `"enabled": true`. The server ships disabled so a fresh copy grants nothing. Notes:
+   Then edit it: set `ssh_alias` to your alias, rename the `web-prod` host, then copy one of the two example projects for each project you run: set `host`, a `description`, `use` (the templates you want) and `vars` (container and service names, project directory, log paths, PHP version paths, systemd units), and set `"enabled": true`. Delete the template and project entries you do not need. The example projects ship disabled so a fresh copy grants nothing. The starter also adds `docker_logs_window`, which reads container logs between two offsets (for example 30m ago to 10m ago). Notes:
    - Remote executable paths are Debian/Ubuntu defaults; check them with `command -v tail grep journalctl docker` on the server.
    - `docker_*` actions require the SSH account to be in the `docker` group, which is root-equivalent. Prefer reading container logs from journald or files, or a forced-command gateway (Section 3.4), and delete these actions otherwise.
    - `journalctl` actions need the `systemd-journal` (or `adm`) group; `nginx_config_test`, `apache_config_test`, and `kernel_messages` often fail for an unprivileged account and can be removed.
    - Grep actions accept only predefined patterns (enums), never free text, and return the *first* N matches in the file.
 
-   Then run `wayguard-mcp policy validate` and `wayguard-mcp actions list --server <server-id>`. Restart the agent session after every policy change; the server loads the policy only at startup.
+   Then run `wayguard-mcp policy validate` and `wayguard-mcp actions list --server <project-id>`. Restart the agent session after every policy change; the server loads the policy only at startup.
 3. **Ask the agent.** Confirm the server is connected (`/mcp` in Claude Code), then ask by action name, for example: *"Use WayGuard to run `nginx_error_tail` on `waytech-prod` with `lines=100` and explain the errors. Do not use direct SSH."*
 
 The agent sees five tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `list_servers` | Enabled server IDs. |
+| `list_servers` | Enabled projects (each on a host), by project ID. |
 | `list_actions` | Actions and parameter limits for one server. |
 | `run_action` | Runs one named action; returns bounded output and a `status` (`ok`, `denied`, `timeout`, `auth_error`, …). |
 | `propose_action` | Requests a new action for human review; never executes anything. |
@@ -180,7 +180,7 @@ For production environments, the recommended layered setup is:
 ## 1.4 Output, audit, and privacy rules
 
 - Return the minimum output necessary to diagnose the issue.
-- Use per-action output caps; use a conservative global default (for example, 32 KiB) and truncate with an explicit marker when reached.
+- Use per-action output caps; use a conservative global default (for example, 32 KiB) that applies to every action that sets none, and truncate with an explicit marker when reached. An action may set a higher cap, but never above the hard ceiling (256 KiB per stream).
 - Avoid retaining raw command output by default. The audit log should record metadata such as timestamp, server ID, action ID, normalized parameter summary, duration, exit status, output byte count, timeout/truncation status, and request/correlation ID.
 - Redact obvious secret patterns before displaying output, but do not claim that regular-expression redaction guarantees complete secret removal.
 - Never include the full remote command or sensitive parameter values in general logs. If a value is needed for auditing, store a masked or hashed representation.
@@ -270,63 +270,94 @@ The implementation must:
 
 ## 2.4 Policy format
 
-Use JSON for v1. Version the schema and reject unknown fields by default to prevent spelling mistakes from silently weakening policy. The following example defines the intended shape; the implementation may add fields only with an explicit schema-version change or a backward-compatible extension reviewed under Section 1.
+Use JSON. The schema is versioned (`"version": 2`) and unknown fields are rejected at every level, to prevent spelling mistakes from silently weakening policy. A file with any other version, including a v1 file with a `servers` block, is rejected with `version: must be 2`. There is no migrate command; rewrite the file by hand, starting from [`examples/policy.starter.json`](examples/policy.starter.json). The implementation may add fields only with an explicit schema-version change or a backward-compatible extension reviewed under Section 1.
+
+Policy v2 lets you write each shared thing once. Shared **parameters** define a limit once, **templates** define a set of actions once, **hosts** say how to reach a machine, and **projects** say which templates a project on that host uses and fill in its variables. The following example has one shared parameter, one template, one host and one project:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "defaults": {
     "decision": "deny",
     "timeout_seconds": 15,
     "max_output_bytes": 32768,
     "max_concurrent_actions": 2
   },
-  "servers": {
-    "waytech-prod": {
-      "enabled": true,
-      "ssh_alias": "waytech-prod-debug",
-      "description": "Production web server (optional, at most 200 characters)",
+  "parameters": {
+    "lines": { "type": "integer", "minimum": 1, "maximum": 200 }
+  },
+  "templates": {
+    "wordpress": {
+      "description": "WordPress debug log",
       "actions": {
-        "nginx_error_tail": {
-          "description": "Read the last N lines from the Nginx error log",
+        "wordpress_debug_tail": {
+          "description": "Read the last N lines of the WordPress debug log",
           "risk": "read-only",
           "executable": "/usr/bin/tail",
-          "args": [
-            "-n",
-            "{lines}",
-            "--",
-            "/var/log/nginx/error.log"
-          ],
-          "parameters": {
-            "lines": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200
-            }
-          },
-          "timeout_seconds": 10,
-          "max_output_bytes": 32768
+          "args": ["-n", "{lines}", "--", "${project_dir}/wp-content/debug.log"],
+          "parameters": { "lines": "lines" },
+          "timeout_seconds": 10
         }
       }
+    }
+  },
+  "hosts": {
+    "web-prod": {
+      "ssh_alias": "web-prod-debug",
+      "description": "Production web server"
+    }
+  },
+  "projects": {
+    "example.com": {
+      "enabled": true,
+      "host": "web-prod",
+      "description": "Example WordPress site",
+      "use": ["wordpress"],
+      "vars": { "project_dir": "/srv/example.com" }
     }
   }
 }
 ```
 
-Policy semantics:
+### Sections of the policy
 
-- `servers` keys and action keys are stable identifiers matching a conservative pattern such as `[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}`.
-- `description` on a server is optional (at most 200 characters) and is returned by `list_servers`.
+- **Top level.** `version` (must be `2`), `defaults` and `hosts` and `projects` are required (`hosts` and `projects` may be `{}`). `parameters` and `templates` are optional.
+- **`parameters`** (optional): shared parameter specs keyed by id. An action uses one by giving the id string as the value of its parameter, as in `"lines": "lines"`. The key is the local name that `{lines}` in `args` refers to, so `"rows": "lines"` is also legal. An unknown shared parameter id is an error.
+- **`templates`** (optional): `{id: {description?, actions}}`. Template actions are written exactly like inline actions and are expanded once per project that uses the template.
+- **`hosts`**: one entry per machine. Keys: `ssh_alias` (required), `description`, `use` (template ids), `vars` and `actions`. Host ids and aliases are never exposed to the agent.
+- **`projects`**: one entry per project on a host. Keys: `enabled` and `host` (both required), `description`, `use`, `vars`, `actions` and `disable` (a list of action ids to remove). Each project becomes one entry in `list_servers`, keyed by the project id, with the host's actions plus its own. A disabled project is not listed but is still fully validated.
+
+### Policy semantics
+
+Identifiers and structure:
+
+- Keys of `parameters`, `templates`, `hosts`, `projects` and actions are stable identifiers matching `[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}`.
+- `description` on a host, project or template is optional (at most 200 characters). A project's description is returned by `list_servers`.
 - `ssh_alias` must be a single valid alias string. It must not start with `-`, contain whitespace, or contain command syntax. MCP input must never override it.
-- `executable` must be an absolute path on the **remote** host and must pass policy validation. v1 must reject known command interpreters and shells (including `sh`, `bash`, `zsh`, `dash`, `python`, `perl`, `ruby`, `node`, `env`, `sudo`, `su`, and `busybox`) as action executables by default. An exception must require a documented security review and must not be selectable by agent input.
-- `args` is an array of individual argument strings—not a shell command. Placeholders must occupy a complete argument, such as `{lines}`; embedded interpolation like `--lines={lines}` is disallowed in v1. Reject unknown placeholders. No agent input may add, remove, or reorder argument positions.
-- Supported parameter types in v1: `integer` with minimum/maximum (`minimum` must be 0 or greater; a negative minimum is rejected so a value can never look like an option flag), `enum` with a fixed list, and `string` with maximum length plus an allowlist pattern. If a type or constraint is omitted where required, reject the action.
+- Each project is expanded in this order: host `use` templates (in order), host `actions`, project `use` templates, project `actions`, then `disable`. Defining the same action id twice in one project is an error, and so is listing a template in both the host's and the project's `use`. To replace a template action, `disable` it and define a new id. `disable` naming an action the project does not have is an error. Unknown template, host, action or shared-parameter references are errors. A project may have at most 200 actions after expansion.
+
+Placeholders and variables (three different things):
+
+- `{name}` is an **agent parameter**. It must occupy a complete argument, such as `{lines}`; embedded interpolation like `--lines={lines}` is disallowed. Reject unknown placeholders. No agent input may add, remove, or reorder argument positions.
+- `${var}` is a **string variable**, replaced at load time by a value the policy author wrote. It may appear anywhere inside an `args` element (for example `"${project_dir}/wp-content/debug.log"`), but never in `executable` or `description`. Literal braces next to a `${var}` in the same argument are rejected, and substitution is single-pass, so a value that itself looks like a placeholder is never re-expanded. Agent input never reaches a variable.
+- `"$var"` is a **list variable** and may appear only as the `values` of an `enum` parameter (for example `{"type": "enum", "values": "$containers"}`). The resulting enum is checked exactly like a literal enum.
+- Variable names follow the parameter-name rules. A value is a string or a list of 1-64 strings. Each string must pass the same checks as fixed arguments (no control characters, not starting with `-`, no `..` path segment, at most 256 characters), and may not contain `{` or `}`. Using a string variable where a list is required, or the reverse, or an undefined variable, is an error.
+- Scope: host actions and host templates see only the host's `vars`. Project actions and project templates see the host's `vars` merged with the project's `vars`, and the project's value wins. Unused variables are allowed.
+- An expanded action is held to exactly the same checks as the same action written inline; a template is never a way around a rule.
+
+Actions, parameters and limits:
+
+- `executable` must be an absolute path on the **remote** host and must pass policy validation. The validator rejects known command interpreters and shells (including `sh`, `bash`, `zsh`, `dash`, `python`, `perl`, `ruby`, `node`, `env`, `sudo`, `su`, and `busybox`) as action executables. An exception must require a documented security review and must not be selectable by agent input.
+- `args` is an array of individual argument strings, not a shell command.
+- Supported parameter types: `integer` with minimum/maximum (`minimum` must be 0 or greater; a negative minimum is rejected so a value can never look like an option flag), `enum` with a fixed list (1-64 values), and `string` with maximum length plus an allowlist pattern. If a type or constraint is omitted where required, reject the action.
 - Do not support a `raw`, `shell`, `command`, `script`, or `args_extra` parameter.
 - Do not permit action parameters to choose a file path unless the value is selected from a human-maintained enum of exact paths. Prefer fixed paths in policy.
-- Set action-specific timeout and output caps only within globally defined maximums. A policy entry cannot disable the global timeout or output cap.
+- `defaults.timeout_seconds` and `defaults.max_output_bytes` are the values an action gets when it sets none. An action may set a higher value of its own, up to the hard ceilings below. A policy entry cannot disable the timeout or output cap.
 - Hard ceilings are constants in the code and cannot be raised by policy or by MCP input: timeout 120 s, 256 KiB and 2,000 lines per output stream, and 8 concurrent actions. Policy values above a ceiling are rejected at load.
 - Action description text is displayed as metadata and never interpreted as executable instructions.
-- `risk` must be `read-only` in v1. The validator rejects other risk classes.
+- `risk` must be `read-only`. The validator rejects other risk classes.
+
+Validation errors have the form `<json.path>: <reason>`. For an action that came from a template, the path names where it is written and which project expanded it. `wayguard-mcp policy validate` prints `policy valid: P project(s) on H host(s), N action(s)` on success.
 
 ### Remote command construction
 
@@ -627,21 +658,21 @@ Restrictive permissions are important because the policy reveals which servers a
 
 Open `~/.config/wayguard/policy.json` in a trusted text editor. Do not store it in a project repository and do not ask the agent to edit it. Replace the example server alias with the alias you configured in Section 3.4.
 
-Add only one action to start. For example, the following policy action reads up to 200 lines from one fixed log path:
+Add only one action to start. A policy needs a host (how to reach the machine) and a project (what the agent can target); the project inherits the host's actions. For example, the following policy reads up to 200 lines from one fixed log path:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "defaults": {
     "decision": "deny",
     "timeout_seconds": 15,
     "max_output_bytes": 32768,
     "max_concurrent_actions": 2
   },
-  "servers": {
+  "hosts": {
     "waytech-prod": {
-      "enabled": true,
       "ssh_alias": "waytech-prod-debug",
+      "description": "Production web server",
       "actions": {
         "nginx_error_tail": {
           "description": "Read the last N lines from the Nginx error log",
@@ -660,13 +691,20 @@ Add only one action to start. For example, the following policy action reads up 
         }
       }
     }
+  },
+  "projects": {
+    "waytech-prod": {
+      "enabled": true,
+      "host": "waytech-prod",
+      "description": "Production web server"
+    }
   }
 }
 ```
 
 This example is illustrative. Confirm the correct path to `tail` and the actual log location on your remote operating system before using it. The account must have read permission for that log. Do not solve a permission problem by granting root or unrestricted `sudo`; ask the administrator to provide the smallest necessary read permission.
 
-The action is safer than a `run shell command` tool because the executable, log path, and argument order are defined in policy. The model can change only `lines`, an integer constrained to a narrow range. It cannot choose an arbitrary path or append shell syntax.
+The action is safer than a `run shell command` tool because the executable, log path, and argument order are defined in policy. The model can change only `lines`, an integer constrained to a narrow range. Because the action sits on the host, every project on that host gets it; when you add more actions, move shared ones into `templates` (Section 2.4). It cannot choose an arbitrary path or append shell syntax.
 
 Validate the policy before starting the MCP server:
 
@@ -675,7 +713,7 @@ wayguard-mcp policy validate
 wayguard-mcp actions list --server waytech-prod
 ```
 
-If validation fails, correct the policy manually and validate again. Never bypass a validation error just to make a tool available.
+The `--server` value is a project id. If validation fails, correct the policy manually and validate again. Never bypass a validation error just to make a tool available.
 
 ## 3.7 Connect the MCP server to an agent
 
@@ -838,7 +876,7 @@ Verify the alias using `ssh -G ALIAS` and perform a human-operated connection te
 
 ### The policy validator rejects an action
 
-Read the validator message carefully. Common causes include unknown fields, a missing parameter schema, an executable that is not allowed, a placeholder embedded inside an argument, an overly broad path, or limits above the global maximum. Correct the policy rather than disabling validation.
+Read the validator message carefully. Common causes include a `version` other than 2, unknown fields, an unknown template, host, shared parameter or variable, an action id defined twice in one project, a missing parameter schema, an executable that is not allowed, a placeholder embedded inside an argument, an overly broad path, or limits above the global maximum. Correct the policy rather than disabling validation.
 
 ### The action returns “permission denied” for a log
 
