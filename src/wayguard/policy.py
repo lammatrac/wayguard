@@ -378,11 +378,9 @@ def _action_limit(
     default = getattr(defaults, key) if defaults is not None else None
     if key not in raw:
         return default
-    v = _positive_int(raw[key], None, f"{path}.{key}", errs)
+    ceiling = config.MAX_TIMEOUT_SECONDS if key == "timeout_seconds" else config.MAX_STREAM_BYTES
+    v = _positive_int(raw[key], ceiling, f"{path}.{key}", errs)
     if v is None:
-        return None
-    if default is not None and v > default:
-        errs.add(f"{path}.{key}", "exceeds policy defaults")
         return None
     return v if default is not None else None
 

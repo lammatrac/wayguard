@@ -78,6 +78,22 @@ def test_valid_policy_builds_model() -> None:
     assert len(p.sha256) == 64
 
 
+def test_action_cap_above_default_within_ceiling() -> None:
+    d = good()
+    action(d).update(max_output_bytes=262144, timeout_seconds=120)
+    a = parse_policy(dump(d)).servers["prod"].actions["tail"]
+    assert a.max_output_bytes == 262144 and a.timeout_seconds == 120
+
+
+@pytest.mark.parametrize("key,val", [("max_output_bytes", 262145), ("timeout_seconds", 121)])
+def test_action_cap_above_ceiling_rejected(key: str, val: int) -> None:
+    d = good()
+    action(d)[key] = val
+    with pytest.raises(PolicyInvalidError) as e:
+        parse_policy(dump(d))
+    assert any("exceeds limit" in x for x in e.value.errors)
+
+
 def mutations() -> list[tuple[str, Any]]:
     def f(fn: Any) -> Any:
         def run(d: dict[str, Any]) -> None:
@@ -113,8 +129,6 @@ def mutations() -> list[tuple[str, Any]]:
         ("bytes_262145", f(lambda d: d["defaults"].update(max_output_bytes=262145))),
         ("conc_9", f(lambda d: d["defaults"].update(max_concurrent_actions=9))),
         ("conc_bool", f(lambda d: d["defaults"].update(max_concurrent_actions=True))),
-        ("action_timeout_above_default", f(lambda d: action(d).update(timeout_seconds=16))),
-        ("action_bytes_above_default", f(lambda d: action(d).update(max_output_bytes=32769))),
         ("desc_long", f(lambda d: srv(d).update(description="x" * 201))),
         ("desc_ctrl", f(lambda d: srv(d).update(description="a\x00b"))),
         ("desc_nonstr", f(lambda d: srv(d).update(description=5))),
