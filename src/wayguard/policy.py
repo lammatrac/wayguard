@@ -161,10 +161,15 @@ def _is_int(v: object) -> bool:
 
 
 class _Errors:
+    """Error sink. `items` is capped at MAX_ERRORS; `count` keeps counting past the cap,
+    so `errs.count > before` stays a reliable "did this step fail?" guard."""
+
     def __init__(self) -> None:
         self.items: list[str] = []
+        self.count = 0
 
     def add(self, path: str, reason: str) -> None:
+        self.count += 1
         if len(self.items) < MAX_ERRORS:
             self.items.append(f"{path or '$'}: {reason}")
 
@@ -235,6 +240,15 @@ def _parse_defaults(raw: object, errs: _Errors) -> Defaults | None:
     return Defaults(t, b, c)
 
 
+def _misplaced_var(value: str) -> str | None:
+    """Variable syntax inside a literal enum value is a mistake, never a literal."""
+    if LIST_VAR_RE.match(value):
+        return "list variable must be the whole values field"
+    if "${" in value:
+        return "variables are not allowed here"
+    return None
+
+
 def _parse_parameter(name: str, raw: object, path: str, errs: _Errors) -> ParameterSpec | None:
     if not PARAM_NAME_RE.match(name):
         errs.add(path, "invalid parameter name")
@@ -278,11 +292,12 @@ def _parse_parameter(name: str, raw: object, path: str, errs: _Errors) -> Parame
                 errs.add(f"{path}.values[{i}]", "must be a string")
                 good = False
                 continue
-            why = string_value_violation(v, MAX_STRING_LENGTH)
+            why = string_value_violation(v, MAX_STRING_LENGTH) or _misplaced_var(v)
             if why:
                 errs.add(f"{path}.values[{i}]", why)
                 good = False
         return ParameterSpec(name, "enum", values=tuple(vals)) if good else None
+
     ml, pat = raw["max_length"], raw["pattern"]
     good = True
     if not _is_int(ml) or not 1 <= ml <= MAX_STRING_LENGTH:
@@ -309,7 +324,7 @@ def _parse_action(
     if not isinstance(raw, dict):
         errs.add(path, "must be an object")
         return None
-    before = len(errs.items)
+    before = errs.count
     _check_keys(
         raw, {"description", "risk", "executable", "args", "parameters"},
         {"timeout_seconds", "max_output_bytes"}, path, errs,
@@ -368,7 +383,7 @@ def _parse_action(
 
     timeout = _action_limit(raw, "timeout_seconds", defaults, path, errs)
     cap = _action_limit(raw, "max_output_bytes", defaults, path, errs)
-    if len(errs.items) > before or defaults is None or timeout is None or cap is None:
+    if errs.count > before or defaults is None or timeout is None or cap is None:
         return None
     return Action(
         id=aid, description=str(desc), risk="read-only", executable=str(exe), args=tuple(args),
@@ -471,14 +486,15 @@ def _parse_templates(raw: object, errs: _Errors) -> dict[str, Mapping[str, Any]]
         if not isinstance(traw, dict):
             errs.add(tpath, "must be an object")
             continue
-        before = len(errs.items)
+        before = errs.count
         _check_keys(traw, {"actions"}, {"description"}, tpath, errs)
         if "description" in traw:
             _check_short_description(traw["description"], f"{tpath}.description", errs)
         if "actions" in traw and not isinstance(traw["actions"], dict):
             errs.add(f"{tpath}.actions", "must be an object")
-        if len(errs.items) == before:
-            templates[tid] = dict(traw["actions"])
+        actions = traw.get("actions")
+        if errs.count == before and isinstance(actions, dict):
+            templates[tid] = dict(actions)
     return templates
 
 
@@ -495,7 +511,7 @@ def _parse_host(
     if not isinstance(raw, dict):
         errs.add(path, "must be an object")
         return None
-    before = len(errs.items)
+    before = errs.count
     _check_keys(raw, {"ssh_alias"}, {"description", "actions", "use", "vars"}, path, errs)
     alias = raw.get("ssh_alias")
     if "ssh_alias" in raw:
@@ -513,7 +529,7 @@ def _parse_host(
             actions = dict(raw["actions"])
         else:
             errs.add(f"{path}.actions", "must be an object")
-    if len(errs.items) > before or host_vars is None:
+    if errs.count > before or host_vars is None:
         return None
     return _Host(
         id=hid, ssh_alias=str(alias), description=desc if isinstance(desc, str) else None,
@@ -552,7 +568,7 @@ def _parse_vars(raw: object, path: str, errs: _Errors) -> dict[str, str | tuple[
     if not isinstance(raw, dict):
         errs.add(path, "must be an object")
         return None
-    before = len(errs.items)
+    before = errs.count
     out: dict[str, str | tuple[str, ...]] = {}
     for name, val in raw.items():
         vpath = f"{path}.{_safe_key(name)}"
@@ -573,12 +589,12 @@ def _parse_vars(raw: object, path: str, errs: _Errors) -> dict[str, str | tuple[
                 out[name] = tuple(val)
         else:
             errs.add(vpath, f"must be a string or a list of 1-{MAX_ENUM_VALUES} strings")
-    return out if len(errs.items) == before else None
+    return out if errs.count == before else None
 
 
 def _check_var_string(value: str, path: str, errs: _Errors) -> bool:
     # Braces are banned so a substituted value can never form an agent `{param}` or a `${var}`.
-    why = string_value_violation(value, MAX_STRING_LENGTH)
+    why = "must not be empty" if not value else string_value_violation(value, MAX_STRING_LENGTH)
     if why is None and ("{" in value or "}" in value):
         why = "contains a brace"
     if why:
@@ -637,8 +653,34 @@ def _resolve_action(
     return out
 
 
+def _var_refs(actions: Mapping[str, Any], shared: Mapping[str, Any]) -> set[str]:
+    """Names referenced as `${v}` in args or `"$v"` enum values (shared ones included)."""
+    refs: set[str] = set()
+    for a in actions.values():
+        if not isinstance(a, dict):
+            continue
+        if isinstance(a.get("args"), list):
+            for arg in a["args"]:
+                if isinstance(arg, str):
+                    refs.update(VAR_REF_RE.findall(arg))
+        if isinstance(a.get("parameters"), dict):
+            for spec in a["parameters"].values():
+                if isinstance(spec, str):
+                    spec = shared.get(spec)
+                if isinstance(spec, dict) and isinstance(spec.get("values"), str):
+                    m = LIST_VAR_RE.match(spec["values"])
+                    if m:
+                        refs.add(m.group(1))
+    return refs
+
+
 def _substitute(arg: str, scope: _VarScope, path: str, errs: _Errors) -> str:
     """Replace each `${var}` with a string variable in one pass (no re-scan)."""
+    # A whole-argument "$name" is list-variable syntax in the wrong place. "$" inside a
+    # longer argument (e.g. awk's "$NF" in a program text) stays a literal.
+    if LIST_VAR_RE.match(arg):
+        errs.add(path, "list variables are not allowed in args")
+        return arg
     # A literal brace next to a reference (e.g. "{${x}}") would let a variable select
     # an agent `{param}` placeholder, so braces may only belong to `${...}` here.
     if VAR_REF_RE.search(arg) and any(c in VAR_REF_RE.sub("", arg) for c in "{}"):
@@ -669,7 +711,7 @@ def _expand_project(
     if not isinstance(raw, dict):
         errs.add(path, "must be an object")
         return None
-    before = len(errs.items)
+    before = errs.count
     _check_keys(
         raw, {"enabled", "host"}, {"description", "actions", "disable", "use", "vars"}, path, errs
     )
@@ -699,7 +741,7 @@ def _expand_project(
         else:
             errs.add(f"{path}.disable", "must be a list of strings")
     proj_vars = _parse_vars(raw["vars"], f"{path}.vars", errs) if "vars" in raw else {}
-    if host is None or proj_vars is None or len(errs.items) > before:
+    if host is None or proj_vars is None or errs.count > before:
         return None
     # Host actions see host vars only; project actions see host vars overlaid by project vars.
     project_scope = {**host.vars, **proj_vars}
@@ -723,9 +765,9 @@ def _expand_project(
                 errs.add(apath, f"duplicate action id (also defined in {first[aid]})")
                 continue
             first[aid] = apath
-            n_errs = len(errs.items)
+            n_errs = errs.count
             resolved = _resolve_action(araw, scope, ctx, apath, errs)
-            if len(errs.items) > n_errs:
+            if errs.count > n_errs:
                 continue  # resolution failed; v1 checks on a half-resolved dict only add noise
             a = _parse_action(aid, resolved, apath, ctx.defaults, errs)
             if a:
@@ -735,12 +777,21 @@ def _expand_project(
             actions.pop(did, None)
         else:
             errs.add(f"{path}.disable", f"unknown action '{_safe_key(did)}'")
+    if proj_vars:
+        # Project-scope actions: the project's own templates and actions. A project var
+        # nothing there references is most likely a misspelling that would silently let
+        # the host's value win, so it is an error (host vars may stay unused).
+        groups = [ctx.templates[t] for t in use if t in ctx.templates] + [raw_actions]
+        refs = set().union(*(_var_refs(g, ctx.shared) for g in groups))
+        for name in proj_vars:
+            if name not in refs:
+                errs.add(f"{path}.vars.{_safe_key(name)}", "unused variable")
     if len(first) > MAX_ACTIONS_PER_PROJECT:
         errs.add(path, f"too many actions (max {MAX_ACTIONS_PER_PROJECT})")
-    if len(errs.items) > before:
+    if errs.count > before:
         return None
     return Server(
-        id=pid, enabled=bool(raw["enabled"]), ssh_alias=host.ssh_alias,
+        id=pid, enabled=raw.get("enabled") is True, ssh_alias=host.ssh_alias,
         description=desc if isinstance(desc, str) else None, actions=actions,
     )  # fmt: skip
 

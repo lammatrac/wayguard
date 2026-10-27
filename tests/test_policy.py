@@ -423,8 +423,10 @@ def test_host_actions_ignore_project_vars() -> None:
     host_act["args"][3] = "${dir}/x.log"
     d["hosts"]["prod-host"].update(vars={"dir": "/host"}, actions={"hlog": host_act})
     set_vars(d, dir="/proj")
+    action(d)["args"][3] = "${dir}/x.log"
     p = parse_policy(dump(d))
     assert p.servers["prod"].actions["hlog"].args[3] == "/host/x.log"
+    assert p.servers["prod"].actions["tail"].args[3] == "/proj/x.log"
 
 
 def test_host_action_cannot_see_project_only_var() -> None:
@@ -501,11 +503,134 @@ def test_var_without_literal_braces_accepted(arg: str, out: str) -> None:
     assert parse_policy(dump(d)).servers["prod"].actions["tail"].args[3] == out
 
 
-def test_unused_vars_accepted() -> None:
+def test_unused_host_vars_accepted() -> None:
     d = good()
-    d["hosts"]["prod-host"]["vars"] = {"h": "x"}
-    set_vars(d, p=["a"])
+    d["hosts"]["prod-host"]["vars"] = {"h": "x", "hl": ["a"]}
     parse_policy(dump(d))
+
+
+def test_unused_project_var_rejected() -> None:
+    # A misspelt project var must not silently fall back to the host value.
+    d = good()
+    d["hosts"]["prod-host"]["vars"] = {"log_dir": "/host"}
+    set_vars(d, log_dri="/proj", lst=["a"])
+    action(d)["args"][3] = "${log_dir}/x.log"
+    errs = errors_of(d)
+    assert "projects.prod.vars.log_dri: unused variable" in errs
+    assert "projects.prod.vars.lst: unused variable" in errs
+
+
+def test_project_var_used_only_by_host_action_is_unused() -> None:
+    d = good()
+    host_act = tpl_action(d)
+    host_act["args"][3] = "${dir}/x.log"
+    d["hosts"]["prod-host"].update(vars={"dir": "/host"}, actions={"hlog": host_act})
+    set_vars(d, dir="/proj")
+    assert "projects.prod.vars.dir: unused variable" in errors_of(d)
+
+
+def test_project_vars_used_by_template_shared_enum_and_args_accepted() -> None:
+    d = good()
+    d["parameters"] = {"cs": ENUM_VAR}
+    t_act = tpl_action(d)
+    t_act["args"][3] = "${tdir}/x.log"
+    d["templates"] = {"t": {"actions": {"disk": t_act}}}
+    d["projects"]["prod"]["use"] = ["t"]
+    d["projects"]["prod"]["actions"]["unit"]["parameters"]["unit"] = "cs"
+    d["projects"]["prod"]["actions"]["unit"]["parameters"]["name"] = {
+        "type": "enum",
+        "values": "$names",
+    }
+    set_vars(d, tdir="/srv", c=["nginx"], names=["a"])
+    p = parse_policy(dump(d))
+    assert p.servers["prod"].actions["unit"].parameters["unit"].values == ("nginx",)
+
+
+@pytest.mark.parametrize(
+    "values,reason",
+    [
+        (["$c"], "list variable must be the whole values field"),
+        (["ok", "${c}"], "variables are not allowed here"),
+        (["pre${c}post"], "variables are not allowed here"),
+    ],
+)
+def test_misplaced_var_in_enum_values_rejected(values: list[str], reason: str) -> None:
+    d = good()
+    set_vars(d, c=["a"])
+    d["projects"]["prod"]["actions"]["unit"]["parameters"]["unit"]["values"] = values
+    i = len(values) - 1
+    path = f"projects.prod.actions.unit.parameters.unit.values[{i}]"
+    assert f"{path}: {reason}" in errors_of(d)
+
+
+def test_misplaced_var_in_shared_enum_values_rejected() -> None:
+    d = good()
+    d["parameters"] = {"cs": {"type": "enum", "values": ["ok", "$c"]}}
+    assert "parameters.cs.values[1]: list variable must be the whole values field" in errors_of(d)
+
+
+def test_list_var_syntax_as_whole_arg_rejected() -> None:
+    d = good()
+    set_vars(d, containers=["a"])
+    action(d)["args"][3] = "$containers"
+    errs = errors_of(d)
+    assert "projects.prod.actions.tail.args[3]: list variables are not allowed in args" in errs
+
+
+@pytest.mark.parametrize("arg", ["$NF/x", "/srv/a$b", "$", "$$x", "price$"])
+def test_dollar_inside_longer_arg_accepted(arg: str) -> None:
+    d = good()
+    action(d)["args"][3] = arg
+    assert parse_policy(dump(d)).servers["prod"].actions["tail"].args[3] == arg
+
+
+@pytest.mark.parametrize(
+    "value,path", [("", "projects.prod.vars.v"), (["ok", ""], "projects.prod.vars.v[1]")]
+)
+def test_empty_var_value_rejected(value: Any, path: str) -> None:
+    d = good()
+    set_vars(d, v=value)
+    action(d)["args"][3] = "${v}"
+    assert f"{path}: must not be empty" in errors_of(d)
+
+
+def test_two_templates_same_action_id_collide() -> None:
+    d = good()
+    d["templates"] = {
+        "t1": {"actions": {"disk": tpl_action(d)}},
+        "t2": {"actions": {"disk": tpl_action(d)}},
+    }
+    d["projects"]["prod"]["use"] = ["t1", "t2"]
+    errs = errors_of(d)
+    assert (
+        "projects.prod.use.t2.actions.disk: duplicate action id"
+        " (also defined in projects.prod.use.t1.actions.disk)"
+    ) in errs
+
+
+def _over_cap(d: dict[str, Any]) -> dict[str, Any]:
+    for i in range(policy.MAX_ERRORS + 5):
+        d[f"junk{i}"] = 1
+    return d
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d.update(templates={"t": {"description": "x"}}),
+        lambda d: d.update(templates={"t": {"actions": [1, 2]}}),
+        lambda d: d["projects"]["prod"].pop("enabled"),
+        lambda d: d["hosts"]["prod-host"].update(vars=[1]),
+        lambda d: d["projects"]["prod"].update(vars={"v": 1}),
+        lambda d: action(d).update(args=7),
+    ],
+)
+def test_error_cap_reached_never_crashes(mutate: Any) -> None:
+    d = _over_cap(good())
+    mutate(d)
+    with pytest.raises(PolicyInvalidError) as e:
+        parse_policy(dump(d))
+    assert len(e.value.errors) == policy.MAX_ERRORS
 
 
 def mutations() -> list[tuple[str, Any]]:
@@ -1004,3 +1129,32 @@ def test_starter_policy_is_valid_and_keeps_v1_limits() -> None:
     assert w.max_output_bytes == 262144
     assert w.parameters["since"].values == ("60m", "50m", "40m", "30m", "20m", "10m")
     assert all(not s.enabled for s in p.servers.values())
+
+
+# The v1 starter (commit 49bd344), kept verbatim so the v2 rewrite stays pinned to it.
+V1_STARTER = Path(__file__).parent / "fixtures" / "policy.v1.starter.json"
+
+
+def _spec_as_v1(spec: policy.ParameterSpec) -> dict[str, Any]:
+    if spec.type == "integer":
+        return {"type": "integer", "minimum": spec.minimum, "maximum": spec.maximum}
+    if spec.type == "enum":
+        return {"type": "enum", "values": list(spec.values or ())}
+    return {"type": "string", "max_length": spec.max_length, "pattern": spec.pattern}
+
+
+def test_starter_expands_to_v1_commands() -> None:
+    v1 = json.loads(V1_STARTER.read_bytes())["servers"]["web-prod"]["actions"]
+    p = parse_policy(STARTER.read_bytes())
+    found: dict[str, policy.Action] = {}
+    for s in p.servers.values():
+        for aid, a in s.actions.items():
+            # an action that several projects share must expand identically in each
+            assert found.setdefault(aid, a) == a
+    assert set(v1) <= set(found)
+    assert set(found) - set(v1) == {"docker_logs_window"}
+    for aid, raw in v1.items():
+        a = found[aid]
+        assert a.executable == raw["executable"], aid
+        assert list(a.args) == raw["args"], aid
+        assert {k: _spec_as_v1(v) for k, v in a.parameters.items()} == raw["parameters"], aid
