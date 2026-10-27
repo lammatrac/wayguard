@@ -45,6 +45,38 @@ Then edit `~/.config/wayguard/policy.json` by hand to add your SSH aliases and r
 
 What it does **not** change: it installs no system packages, background daemons, or services; it opens no network port (the agent starts it as a stdio child process); and it does not modify `~/.ssh/config`, `known_hosts`, SSH keys, or anything on remote servers. SSH aliases, identities, and host keys are set up by you (Sections 3.3–3.4).
 
+### How to use
+
+1. **Prepare SSH (once per server).** Create a dedicated key and remote account, add an alias to `~/.ssh/config` (e.g. `waytech-prod-debug`), and confirm `ssh waytech-prod-debug` connects with a verified host key (Sections 3.3–3.4).
+2. **Allow actions (human only).** Edit `~/.config/wayguard/policy.json` and map a server ID to that alias with one or more named actions. Each action fixes the executable, arguments, and paths; the agent can only fill declared, bounded parameters (full example in Section 3.6):
+
+   ```json
+   "nginx_error_tail": {
+     "description": "Read the last N lines from the Nginx error log",
+     "risk": "read-only",
+     "executable": "/usr/bin/tail",
+     "args": ["-n", "{lines}", "--", "/var/log/nginx/error.log"],
+     "parameters": { "lines": { "type": "integer", "minimum": 1, "maximum": 200 } }
+   }
+   ```
+
+   Then run `wayguard-mcp policy validate` and `wayguard-mcp actions list --server waytech-prod`. Restart the agent session after every policy change; the server loads the policy only at startup.
+3. **Ask the agent.** Confirm the server is connected (`/mcp` in Claude Code), then ask by action name, for example: *"Use WayGuard to run `nginx_error_tail` on `waytech-prod` with `lines=100` and explain the errors. Do not use direct SSH."*
+
+The agent sees five tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `list_servers` | Enabled server IDs. |
+| `list_actions` | Actions and parameter limits for one server. |
+| `run_action` | Runs one named action; returns bounded output and a `status` (`ok`, `denied`, `timeout`, `auth_error`, …). |
+| `propose_action` | Requests a new action for human review; never executes anything. |
+| `get_policy_status` | Policy validity, and whether the file changed since the server loaded it. |
+
+When the agent needs a diagnostic that is not allowed, it files a proposal. Review it with `wayguard-mcp proposals list` / `proposals show <ID>`; if appropriate, add a bounded action to the policy by hand, validate, restart the agent, and run `proposals mark-done <ID>` (or `proposals dismiss <ID>`). See Section 3.9.
+
+Day-to-day commands: `wayguard-mcp doctor` (health check, including whether each alias resolves), `wayguard-mcp audit tail --limit 20` (what was run; metadata only), `wayguard-mcp audit prune --older-than 30`. If every call returns `denied` with `policy_invalid`, the policy is missing, invalid, or has unsafe permissions; `doctor` or `get_policy_status` explains why. For production, also block the agent's direct `ssh` access (Section 3.10), or it can bypass WayGuard.
+
 ### Uninstall
 
 ```bash
