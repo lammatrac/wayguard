@@ -155,6 +155,47 @@ def test_action_cap_above_ceiling_rejected(key: str, val: int) -> None:
     assert any("exceeds limit" in x for x in e.value.errors)
 
 
+SHARED_LINES = {"type": "integer", "minimum": 1, "maximum": 200}
+
+
+def use_shared(d: dict[str, Any], ref: str) -> None:
+    action(d)["parameters"]["lines"] = ref
+
+
+def test_shared_parameter_reference_inlined() -> None:
+    d = good()
+    d["parameters"] = {"lines": SHARED_LINES, "unused": {"type": "enum", "values": ["a"]}}
+    use_shared(d, "lines")
+    other = copy.deepcopy(action(d))
+    other["args"] = ["-n", "{count}", "--", "/var/log/y.log"]
+    other["parameters"] = {"count": "lines"}
+    d["projects"]["prod"]["actions"]["tail2"] = other
+    p = parse_policy(dump(d))
+    acts = p.servers["prod"].actions
+    a, b = acts["tail"].parameters["lines"], acts["tail2"].parameters["count"]
+    assert (a.name, b.name) == ("lines", "count")
+    assert (a.type, a.minimum, a.maximum) == (b.type, b.minimum, b.maximum) == ("integer", 1, 200)
+
+
+def test_shared_parameter_unknown_ref_error_is_sanitized() -> None:
+    d = good()
+    d["parameters"] = {}
+    use_shared(d, "no\nope")
+    with pytest.raises(PolicyInvalidError) as e:
+        parse_policy(dump(d))
+    assert (
+        "projects.prod.actions.tail.parameters.lines: unknown shared parameter 'no?ope'"
+        in e.value.errors
+    )
+
+
+def test_shared_parameter_enum_values_ref_shape_checked() -> None:
+    d = good()
+    d["parameters"] = {"e": {"type": "enum", "values": "$unit_names"}}
+    # shape is valid; resolution of $vars comes later, so it is simply unused here
+    parse_policy(dump(d))
+
+
 def mutations() -> list[tuple[str, Any]]:
     def f(fn: Any) -> Any:
         def run(d: dict[str, Any]) -> None:
@@ -332,6 +373,29 @@ def mutations() -> list[tuple[str, Any]]:
             ),
         ),
         ("projects_not_dict", f(lambda d: d.update(projects=[]))),
+        ("shared_params_not_dict", f(lambda d: d.update(parameters=[]))),
+        ("shared_param_unknown_ref", f(lambda d: d.update(parameters={}) or use_shared(d, "nope"))),
+        (
+            "shared_param_invalid_spec",
+            f(
+                lambda d: d.update(
+                    parameters={"lines": {"type": "integer", "minimum": 9, "maximum": 1}}
+                )
+            ),
+        ),
+        (
+            "shared_param_bad_id",
+            f(lambda d: d.update(parameters={"-bad": SHARED_LINES})),
+        ),
+        (
+            "shared_param_forbidden_type",
+            f(lambda d: d.update(parameters={"lines": {"type": "raw"}})),
+        ),
+        (
+            "shared_param_bad_values_ref",
+            f(lambda d: d.update(parameters={"e": {"type": "enum", "values": "nginx"}})),
+        ),
+        ("templates_still_unknown", f(lambda d: d.update(templates={}))),
         ("hosts_not_dict", f(lambda d: d.update(hosts=[]))),
     ]
     for name in policy.DENYLIST_SAMPLES:

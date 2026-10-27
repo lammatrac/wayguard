@@ -7,6 +7,7 @@ never echo policy values (only identifier-safe key names, truncated).
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import hashlib
 import json
@@ -31,6 +32,7 @@ MAX_ACTION_DESCRIPTION = 500
 MAX_ALIAS_LENGTH = 255
 MAX_ACTIONS_PER_PROJECT = 200
 
+_VAR_REF_RE = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]{0,63}$")
 ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
 PARAM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9_.@:+][A-Za-z0-9_.@:+-]*$")
@@ -465,6 +467,32 @@ def _parse_host(hid: str, raw: object, errs: _Errors) -> _Host | None:
     )  # fmt: skip
 
 
+def _parse_shared_parameters(raw: object, errs: _Errors) -> dict[str, Any]:
+    path = "parameters"
+    if not isinstance(raw, dict):
+        errs.add(path, "must be an object")
+        return {}
+    shared: dict[str, Any] = {}
+    for pid, spec in raw.items():
+        ppath = f"{path}.{_safe_key(pid)}"
+        if not ID_RE.match(pid):
+            errs.add(ppath, "invalid shared parameter id")
+            continue
+        if (
+            isinstance(spec, dict)
+            and spec.get("type") == "enum"
+            and isinstance(spec.get("values"), str)
+        ):
+            if _check_keys(spec, {"type", "values"}, set(), ppath, errs):
+                if _VAR_REF_RE.match(spec["values"]):
+                    shared[pid] = spec
+                else:
+                    errs.add(f"{ppath}.values", "must be a list or a '$name' variable reference")
+        elif _parse_parameter("x", spec, ppath, errs):
+            shared[pid] = spec
+    return shared
+
+
 def _resolve_action(
     raw: object,
     scope: Mapping[str, str | tuple[str, ...]],
@@ -472,8 +500,21 @@ def _resolve_action(
     path: str,
     errs: _Errors,
 ) -> object:
-    """Hook for shared parameters (Task 3) and variables (Task 5); identity for now."""
-    return raw
+    """Inline shared-parameter references (Task 3); variables are added in Task 5."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("parameters"), dict):
+        return raw
+    params: dict[str, Any] = {}
+    for pname, pval in raw["parameters"].items():
+        if isinstance(pval, str):
+            if pval in ctx.shared:
+                pval = copy.deepcopy(ctx.shared[pval])
+            else:
+                errs.add(
+                    f"{path}.parameters.{_safe_key(pname)}",
+                    f"unknown shared parameter '{_safe_key(pval)}'",
+                )
+        params[pname] = pval
+    return {**raw, "parameters": params}
 
 
 def _expand_project(
@@ -561,7 +602,7 @@ def parse_policy(data: bytes, path: Path | None = None) -> Policy:
     errs = _Errors()
     if not isinstance(doc, dict):
         raise PolicyInvalidError(["$: must be a JSON object"])
-    _check_keys(doc, {"version", "defaults", "hosts", "projects"}, set(), "$", errs)
+    _check_keys(doc, {"version", "defaults", "hosts", "projects"}, {"parameters"}, "$", errs)
     if "version" in doc and (not _is_int(doc["version"]) or doc["version"] != SCHEMA_VERSION):
         errs.add("version", f"must be {SCHEMA_VERSION}")
     defaults = _parse_defaults(doc["defaults"], errs) if "defaults" in doc else None
@@ -574,7 +615,8 @@ def parse_policy(data: bytes, path: Path | None = None) -> Policy:
                 h = _parse_host(hid, hraw, errs)
                 if h:
                     hosts[hid] = h
-    ctx = _Ctx(defaults=defaults, shared={}, templates={})
+    shared = _parse_shared_parameters(doc["parameters"], errs) if "parameters" in doc else {}
+    ctx = _Ctx(defaults=defaults, shared=shared, templates={})
     servers: dict[str, Server] = {}
     if "projects" in doc:
         if not isinstance(doc["projects"], dict):
