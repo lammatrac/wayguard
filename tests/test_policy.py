@@ -196,6 +196,109 @@ def test_shared_parameter_enum_values_ref_shape_checked() -> None:
     parse_policy(dump(d))
 
 
+def tpl_action(d: dict[str, Any]) -> dict[str, Any]:
+    return copy.deepcopy(action(d))
+
+
+def test_template_expands_for_each_project() -> None:
+    d = good()
+    d["templates"] = {"t": {"description": "T", "actions": {"disk": tpl_action(d)}}}
+    d["projects"]["a"] = {"enabled": True, "host": "prod-host", "use": ["t"]}
+    d["projects"]["b"] = {"enabled": True, "host": "prod-host", "use": ["t"]}
+    p = parse_policy(dump(d))
+    assert "disk" in p.servers["a"].actions and "disk" in p.servers["b"].actions
+    assert "disk" not in p.servers["prod"].actions
+
+
+def test_host_template_actions_shared() -> None:
+    d = good()
+    d["templates"] = {"basics": {"actions": {"disk": tpl_action(d)}}}
+    d["hosts"]["prod-host"]["use"] = ["basics"]
+    d["projects"]["b"] = {"enabled": True, "host": "prod-host"}
+    p = parse_policy(dump(d))
+    assert "disk" in p.servers["prod"].actions and "disk" in p.servers["b"].actions
+
+
+def test_template_action_equals_inline() -> None:
+    d = good()
+    d["templates"] = {"t": {"actions": {"disk": tpl_action(d)}}}
+    d["projects"]["a"] = {"enabled": True, "host": "prod-host", "use": ["t"]}
+    d["projects"]["b"] = {
+        "enabled": True,
+        "host": "prod-host",
+        "actions": {"disk": tpl_action(d)},
+    }
+    p = parse_policy(dump(d))
+    assert p.servers["a"].actions["disk"] == p.servers["b"].actions["disk"]
+
+
+def test_template_in_host_and_project_collides() -> None:
+    d = good()
+    d["templates"] = {"t": {"actions": {"disk": tpl_action(d)}}}
+    d["hosts"]["prod-host"]["use"] = ["t"]
+    d["projects"]["prod"]["use"] = ["t"]
+    with pytest.raises(PolicyInvalidError) as e:
+        parse_policy(dump(d))
+    assert any(
+        x.startswith("projects.prod.use.t.actions.disk: duplicate action id")
+        and "hosts.prod-host.use.t.actions.disk" in x
+        for x in e.value.errors
+    )
+
+
+def test_template_error_names_source() -> None:
+    d = good()
+    bad = tpl_action(d)
+    bad["executable"] = "/bin/bash"
+    d["templates"] = {"t": {"actions": {"disk": bad}}}
+    d["projects"]["a"] = {"enabled": True, "host": "prod-host", "use": ["t"]}
+    with pytest.raises(PolicyInvalidError) as e:
+        parse_policy(dump(d))
+    assert any(x.startswith("projects.a.use.t.actions.") for x in e.value.errors)
+
+
+def test_template_actions_resolve_shared_parameters() -> None:
+    d = good()
+    d["parameters"] = {"lines": SHARED_LINES}
+    t = tpl_action(d)
+    t["parameters"] = {"lines": "lines"}
+    d["templates"] = {"t": {"actions": {"disk": t}}}
+    d["projects"]["a"] = {"enabled": True, "host": "prod-host", "use": ["t"]}
+    p = parse_policy(dump(d))
+    assert p.servers["a"].actions["disk"].parameters["lines"].maximum == 200
+
+
+def test_template_order_host_then_project_and_disable() -> None:
+    d = good()
+    d["templates"] = {"t": {"actions": {"disk": tpl_action(d)}}}
+    d["projects"]["prod"]["use"] = ["t"]
+    d["projects"]["prod"]["disable"] = ["disk"]
+    assert "disk" not in parse_policy(dump(d)).servers["prod"].actions
+
+
+def test_template_counts_toward_action_cap() -> None:
+    d = good()
+    d["templates"] = {"t": {"actions": {f"a{i}": tpl_action(d) for i in range(201)}}}
+    d["projects"]["prod"]["use"] = ["t"]
+    with pytest.raises(PolicyInvalidError) as e:
+        parse_policy(dump(d))
+    assert any("too many actions" in x for x in e.value.errors)
+
+
+def test_unused_template_accepted() -> None:
+    d = good()
+    d["templates"] = {"t": {"actions": {"disk": tpl_action(d)}}}
+    parse_policy(dump(d))
+
+
+def test_use_error_messages_sanitized() -> None:
+    d = good()
+    d["projects"]["prod"]["use"] = ["no\nope"]
+    with pytest.raises(PolicyInvalidError) as e:
+        parse_policy(dump(d))
+    assert "projects.prod.use: unknown template 'no?ope'" in e.value.errors
+
+
 def mutations() -> list[tuple[str, Any]]:
     def f(fn: Any) -> Any:
         def run(d: dict[str, Any]) -> None:
@@ -395,7 +498,30 @@ def mutations() -> list[tuple[str, Any]]:
             "shared_param_bad_values_ref",
             f(lambda d: d.update(parameters={"e": {"type": "enum", "values": "nginx"}})),
         ),
-        ("templates_still_unknown", f(lambda d: d.update(templates={}))),
+        ("templates_not_dict", f(lambda d: d.update(templates=[]))),
+        ("template_bad_id", f(lambda d: d.update(templates={"-bad": {"actions": {}}}))),
+        ("template_not_object", f(lambda d: d.update(templates={"t": []}))),
+        ("template_unknown_field", f(lambda d: d.update(templates={"t": {"actions": {}, "x": 1}}))),
+        ("template_missing_actions", f(lambda d: d.update(templates={"t": {}}))),
+        ("template_actions_not_dict", f(lambda d: d.update(templates={"t": {"actions": []}}))),
+        (
+            "template_description_too_long",
+            f(lambda d: d.update(templates={"t": {"actions": {}, "description": "x" * 201}})),
+        ),
+        ("use_unknown_template", f(lambda d: d["projects"]["prod"].update(use=["nope"]))),
+        ("use_not_list", f(lambda d: d["projects"]["prod"].update(use="t"))),
+        ("use_item_not_string", f(lambda d: d["projects"]["prod"].update(use=[1]))),
+        (
+            "use_duplicate",
+            f(
+                lambda d: (
+                    d.update(templates={"t": {"actions": {}}}),
+                    d["projects"]["prod"].update(use=["t", "t"]),
+                )
+            ),
+        ),
+        ("host_use_unknown_template", f(lambda d: d["hosts"]["prod-host"].update(use=["nope"]))),
+        ("host_use_not_list", f(lambda d: d["hosts"]["prod-host"].update(use={}))),
         ("hosts_not_dict", f(lambda d: d.update(hosts=[]))),
     ]
     for name in policy.DENYLIST_SAMPLES:

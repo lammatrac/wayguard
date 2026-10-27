@@ -437,7 +437,53 @@ class _Ctx:
     templates: Mapping[str, Mapping[str, Any]]
 
 
-def _parse_host(hid: str, raw: object, errs: _Errors) -> _Host | None:
+def _parse_use(
+    raw: object, templates: Mapping[str, Mapping[str, Any]], path: str, errs: _Errors
+) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        errs.add(path, "must be a list of template ids")
+        return ()
+    seen: set[str] = set()
+    for tid in raw:
+        if tid not in templates:
+            errs.add(path, f"unknown template '{_safe_key(tid)}'")
+        elif tid in seen:
+            errs.add(path, f"duplicate template '{_safe_key(tid)}'")
+        seen.add(tid)
+    return tuple(raw)
+
+
+def _parse_templates(raw: object, errs: _Errors) -> dict[str, Mapping[str, Any]]:
+    path = "templates"
+    if not isinstance(raw, dict):
+        errs.add(path, "must be an object")
+        return {}
+    templates: dict[str, Mapping[str, Any]] = {}
+    for tid, traw in raw.items():
+        tpath = f"{path}.{_safe_key(tid)}"
+        if not ID_RE.match(tid):
+            errs.add(tpath, "invalid template id")
+            continue
+        if not isinstance(traw, dict):
+            errs.add(tpath, "must be an object")
+            continue
+        before = len(errs.items)
+        _check_keys(traw, {"actions"}, {"description"}, tpath, errs)
+        if "description" in traw:
+            _check_short_description(traw["description"], f"{tpath}.description", errs)
+        if "actions" in traw and not isinstance(traw["actions"], dict):
+            errs.add(f"{tpath}.actions", "must be an object")
+        if len(errs.items) == before:
+            templates[tid] = dict(traw["actions"])
+    return templates
+
+
+def _parse_host(
+    hid: str,
+    raw: object,
+    errs: _Errors,
+    templates: Mapping[str, Mapping[str, Any]] | None = None,
+) -> _Host | None:
     path = f"hosts.{_safe_key(hid)}"
     if not ID_RE.match(hid):
         errs.add(path, "invalid host id")
@@ -446,13 +492,16 @@ def _parse_host(hid: str, raw: object, errs: _Errors) -> _Host | None:
         errs.add(path, "must be an object")
         return None
     before = len(errs.items)
-    _check_keys(raw, {"ssh_alias"}, {"description", "actions"}, path, errs)
+    _check_keys(raw, {"ssh_alias"}, {"description", "actions", "use"}, path, errs)
     alias = raw.get("ssh_alias")
     if "ssh_alias" in raw:
         _check_alias(alias, f"{path}.ssh_alias", errs)
     desc = raw.get("description")
     if "description" in raw:
         _check_short_description(desc, f"{path}.description", errs)
+    use: tuple[str, ...] = ()
+    if "use" in raw:
+        use = _parse_use(raw["use"], templates or {}, f"{path}.use", errs)
     actions: dict[str, Any] = {}
     if "actions" in raw:
         if isinstance(raw["actions"], dict):
@@ -463,7 +512,7 @@ def _parse_host(hid: str, raw: object, errs: _Errors) -> _Host | None:
         return None
     return _Host(
         id=hid, ssh_alias=str(alias), description=desc if isinstance(desc, str) else None,
-        use=(), vars={}, actions=actions,
+        use=use, vars={}, actions=actions,
     )  # fmt: skip
 
 
@@ -528,7 +577,7 @@ def _expand_project(
         errs.add(path, "must be an object")
         return None
     before = len(errs.items)
-    _check_keys(raw, {"enabled", "host"}, {"description", "actions", "disable"}, path, errs)
+    _check_keys(raw, {"enabled", "host"}, {"description", "actions", "disable", "use"}, path, errs)
     if "enabled" in raw and not isinstance(raw["enabled"], bool):
         errs.add(f"{path}.enabled", "must be a boolean")
     host: _Host | None = None
@@ -545,6 +594,9 @@ def _expand_project(
     if not isinstance(raw_actions, dict):
         errs.add(f"{path}.actions", "must be an object")
         raw_actions = {}
+    use: tuple[str, ...] = ()
+    if "use" in raw:
+        use = _parse_use(raw["use"], ctx.templates, f"{path}.use", errs)
     disable: list[str] = []
     if "disable" in raw:
         if isinstance(raw["disable"], list) and all(isinstance(x, str) for x in raw["disable"]):
@@ -554,10 +606,12 @@ def _expand_project(
     if host is None or len(errs.items) > before:
         return None
 
-    sources: list[tuple[str, Mapping[str, Any]]] = [
-        (f"hosts.{_safe_key(host.id)}.actions", host.actions),
-        (f"{path}.actions", raw_actions),
-    ]
+    hpath = f"hosts.{_safe_key(host.id)}"
+    sources: list[tuple[str, Mapping[str, Any]]] = []
+    sources += [(f"{hpath}.use.{_safe_key(t)}.actions", ctx.templates[t]) for t in host.use]
+    sources.append((f"{hpath}.actions", host.actions))
+    sources += [(f"{path}.use.{_safe_key(t)}.actions", ctx.templates[t]) for t in use]
+    sources.append((f"{path}.actions", raw_actions))
     first: dict[str, str] = {}
     actions: dict[str, Action] = {}
     for base, group in sources:
@@ -602,21 +656,24 @@ def parse_policy(data: bytes, path: Path | None = None) -> Policy:
     errs = _Errors()
     if not isinstance(doc, dict):
         raise PolicyInvalidError(["$: must be a JSON object"])
-    _check_keys(doc, {"version", "defaults", "hosts", "projects"}, {"parameters"}, "$", errs)
+    _check_keys(
+        doc, {"version", "defaults", "hosts", "projects"}, {"parameters", "templates"}, "$", errs
+    )
     if "version" in doc and (not _is_int(doc["version"]) or doc["version"] != SCHEMA_VERSION):
         errs.add("version", f"must be {SCHEMA_VERSION}")
     defaults = _parse_defaults(doc["defaults"], errs) if "defaults" in doc else None
+    templates = _parse_templates(doc["templates"], errs) if "templates" in doc else {}
     hosts: dict[str, _Host] = {}
     if "hosts" in doc:
         if not isinstance(doc["hosts"], dict):
             errs.add("hosts", "must be an object")
         else:
             for hid, hraw in doc["hosts"].items():
-                h = _parse_host(hid, hraw, errs)
+                h = _parse_host(hid, hraw, errs, templates)
                 if h:
                     hosts[hid] = h
     shared = _parse_shared_parameters(doc["parameters"], errs) if "parameters" in doc else {}
-    ctx = _Ctx(defaults=defaults, shared=shared, templates={})
+    ctx = _Ctx(defaults=defaults, shared=shared, templates=templates)
     servers: dict[str, Server] = {}
     if "projects" in doc:
         if not isinstance(doc["projects"], dict):
