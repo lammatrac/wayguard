@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install (locked)
+        run: uv sync --locked --python ${{ matrix.python }}
+      - name: Lint
+        run: uv run --locked ruff check
+      - name: Types
+        run: uv run --locked mypy --strict src/
+      - name: Static safety (AC-014)
+        run: uv run --locked python scripts/check_static_safety.py src
+      - name: Tests
+        run: uv run --locked pytest
