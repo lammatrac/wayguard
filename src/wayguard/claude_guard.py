@@ -119,7 +119,7 @@ def _check_simple(words: list[str]) -> str | None:
         i += 1
     if i == len(words):
         return None
-    prog, args = _program(words[i]), words[i + 1:]
+    prog, args = _program(words[i]), words[i + 1 :]
     if prog in REMOTE_PROGRAMS:
         return f"direct `{prog}` is blocked"
     if prog in {"export", "declare", "typeset", "local", "readonly", "alias"}:
@@ -138,9 +138,11 @@ def _check_simple(words: list[str]) -> str | None:
             return "`rsync` to a remote host is blocked"
     if prog in CONTAINER_CLIS:
         first = next((a for a in args if not a.startswith("-")), None)
-        if first in ("context", "connection") or any(
-            a == f or a.startswith(f + "=") for a in args for f in CONTAINER_REMOTE_FLAGS
-        ) or any(a in ("-c", "-r") for a in args[: args.index(first) if first else None]):
+        if (
+            first in ("context", "connection")
+            or any(a == f or a.startswith(f + "=") for a in args for f in CONTAINER_REMOTE_FLAGS)
+            or any(a in ("-c", "-r") for a in args[: args.index(first) if first else None])
+        ):
             return f"`{prog}` against a remote engine is blocked"
     if prog == "git" and any(a.lower().startswith("core.sshcommand=") for a in args):
         return "overriding git's ssh command is blocked"

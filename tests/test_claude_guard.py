@@ -10,8 +10,8 @@ from wayguard import claude_guard as g
 # The command a Claude Code session actually used to bypass WayGuard.
 OBSERVED_BYPASS = (
     "cd /tmp/scratchpad && for c in www.bild-esim.com_wp www.bild-esim.com_db; do "
-    "ssh -o BatchMode=yes wlxuser@142.93.109.102 \"docker logs --since 60m --timestamps $c 2>&1\" "
-    "> $c.log; echo \"$c: $(wc -l < $c.log) lines\"; done; "
+    'ssh -o BatchMode=yes wlxuser@142.93.109.102 "docker logs --since 60m --timestamps $c 2>&1" '
+    '> $c.log; echo "$c: $(wc -l < $c.log) lines"; done; '
     "ssh -o BatchMode=yes wlxuser@142.93.109.102 'docker logs --since 60m nginx-proxy 2>&1 | grep -c bild-esim'"
 )
 
@@ -33,7 +33,7 @@ BLOCKED = [
     "echo `ssh host uptime`",
     "diff <(ssh host cat /etc/hosts) /etc/hosts",
     "bash -c 'ssh host uptime'",
-    "sh -lc \"cd /; ssh host\"",
+    'sh -lc "cd /; ssh host"',
     "eval 'ssh host'",
     "sudo -u bob ssh host",
     "env FOO=1 ssh host",
@@ -136,7 +136,9 @@ def test_hook_ignores_other_tools() -> None:
     assert hook({"tool_name": "Read", "tool_input": {"file_path": "/x"}}) == (0, "", "")
 
 
-@pytest.mark.parametrize("raw", ["not json", "[]", json.dumps({"tool_name": "Bash", "tool_input": {}})])
+@pytest.mark.parametrize(
+    "raw", ["not json", "[]", json.dumps({"tool_name": "Bash", "tool_input": {}})]
+)
 def test_hook_fails_closed(raw: str) -> None:
     code, out, err = hook(raw)
     assert code == 2 and out == "" and "refused" in err
@@ -177,7 +179,9 @@ def test_install_preserves_existing_settings_and_is_idempotent(isolated_claude_d
     original = {
         "model": "opus",
         "permissions": {"allow": ["Bash(git add *)"], "deny": ["Bash(rm -rf *)"]},
-        "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "other"}]}]},
+        "hooks": {
+            "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "other"}]}]
+        },
     }
     p.write_text(json.dumps(original))
     p.chmod(0o644)
@@ -308,7 +312,9 @@ def test_cli_guard_invalid_settings(isolated_claude_dir: Path) -> None:
     assert cli.main(["claude-guard", "install"]) == cli.EXIT_OPERATIONAL
 
 
-def test_cli_hook_entry(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_hook_entry(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     from wayguard import cli
 
     event = {"tool_name": "Bash", "tool_input": {"command": "ssh host"}}

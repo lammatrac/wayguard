@@ -175,7 +175,9 @@ def test_deny_all_mode(tmp_path: Path) -> None:
             "servers": sc(await s.call_tool("list_servers", {})),
             "actions": sc(await s.call_tool("list_actions", {"server_id": "prod"})),
             "run": sc(await s.call_tool("run_action", RUN)),
-            "prop": sc(await s.call_tool("propose_action", {"server_id": "a", "goal": "g", "reason": "r"})),
+            "prop": sc(
+                await s.call_tool("propose_action", {"server_id": "a", "goal": "g", "reason": "r"})
+            ),
         }
 
     o = drive(root, fn, ssh)
@@ -265,7 +267,11 @@ def test_propose_action_writes_proposal_policy_untouched(tmp_path: Path) -> None
     async def fn(s: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
         p = sc(await s.call_tool("propose_action", args))
         bad = sc(await s.call_tool("propose_action", {**args, "extra": 1}))
-        run = sc(await s.call_tool("run_action", {"server_id": "newhost", "action_id": "df", "parameters": {}}))
+        run = sc(
+            await s.call_tool(
+                "run_action", {"server_id": "newhost", "action_id": "df", "parameters": {}}
+            )
+        )
         tools = await s.list_tools()
         assert {t.name for t in tools.tools} == TOOLS
         return p, bad, run, {}
@@ -287,7 +293,12 @@ def test_propose_action_limit_denied_and_audited(tmp_path: Path) -> None:
 
     for _ in range(proposals.MAX_PENDING if hasattr(proposals, "MAX_PENDING") else 200):
         proposals.create_proposal(root, server_id="a", goal="g", reason="r", server_known=False)
-    r = sc(drive(root, lambda s: s.call_tool("propose_action", {"server_id": "a", "goal": "g", "reason": "r"})))
+    r = sc(
+        drive(
+            root,
+            lambda s: s.call_tool("propose_action", {"server_id": "a", "goal": "g", "reason": "r"}),
+        )
+    )
     assert r["status"] == "denied" and r["reason_code"] == "proposal_limit"
     assert audit_events(root)[-1]["reason_code"] == "proposal_limit"
 
@@ -306,17 +317,33 @@ def test_serve_subprocess_stdout_hygiene(tmp_path: Path) -> None:
         "sys.exit(cli.main(['serve']))"
     )
     msgs = [
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-            "protocolVersion": "2024-11-05", "capabilities": {},
-            "clientInfo": {"name": "t", "version": "0"}}},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "t", "version": "0"},
+            },
+        },
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-         "params": {"name": "get_policy_status", "arguments": {}}},
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "get_policy_status", "arguments": {}},
+        },
     ]
     proc = subprocess.Popen(
-        [sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, env=env, cwd=str(tmp_path),
+        [sys.executable, "-c", code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
     )
     assert proc.stdin is not None and proc.stdout is not None
     lines: list[str] = []

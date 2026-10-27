@@ -303,9 +303,7 @@ class WayguardService:
             return _result(d, "busy (concurrency_limit): too many running actions, retry later")
         try:
             ssh = self.ssh_path or command.discover_ssh()
-            rr = await ssh_runner.run_action(
-                req, ssh_path=ssh, correlation_id=cid, sink=self.sink
-            )
+            rr = await ssh_runner.run_action(req, ssh_path=ssh, correlation_id=cid, sink=self.sink)
         except command.SshNotFoundError:
             d = {
                 "status": "internal_error",
@@ -415,4 +413,3 @@ def serve(root: Path) -> int:
     finally:
         sys.stdout = real_stdout
     return 0
-

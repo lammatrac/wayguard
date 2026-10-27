@@ -57,9 +57,11 @@ def test_action_cap_above_default_within_ceiling() -> None:
     a = parse_policy(dump(d)).servers["prod"].actions["tail"]
     assert a.max_output_bytes == 262144 and a.timeout_seconds == 120
 
+
 @pytest.mark.parametrize("key,val", [("max_output_bytes", 262145), ("timeout_seconds", 121)])
 def test_action_cap_above_ceiling_rejected(key: str, val: int) -> None:
-    d = good(); action(d)[key] = val
+    d = good()
+    action(d)[key] = val
     with pytest.raises(PolicyInvalidError) as e:
         parse_policy(dump(d))
     assert any("exceeds limit" in x for x in e.value.errors)
@@ -185,16 +187,50 @@ Wording: `list_servers` → "List enabled projects (id, optional description, ac
 
 ```python
 STARTER = Path(__file__).parents[1] / "examples" / "policy.starter.json"
-V1_CAPS = {a: 65536 for a in (
-    "nginx_error_tail", "nginx_error_grep", "nginx_rotated_log_read", "nginx_config_test",
-    "apache_error_tail", "apache_php_fatal_grep", "apache_config_test", "apache_vhosts",
-    "php_fpm_error_tail", "php_fpm_slow_tail", "wordpress_debug_tail", "service_status",
-    "service_journal", "docker_ps", "docker_logs_tail", "docker_logs_since",
-    "docker_compose_logs", "docker_stats", "journal_errors", "kernel_oom_events",
-    "kernel_messages", "failed_services", "disk_usage", "disk_inodes", "memory_usage",
-    "load_average", "listening_ports")}
-V1_CAPS.update({a: 32768 for a in (
-    "nginx_access_tail", "nginx_access_grep", "nginx_rotated_log_grep", "apache_access_tail")})
+V1_CAPS = {
+    a: 65536
+    for a in (
+        "nginx_error_tail",
+        "nginx_error_grep",
+        "nginx_rotated_log_read",
+        "nginx_config_test",
+        "apache_error_tail",
+        "apache_php_fatal_grep",
+        "apache_config_test",
+        "apache_vhosts",
+        "php_fpm_error_tail",
+        "php_fpm_slow_tail",
+        "wordpress_debug_tail",
+        "service_status",
+        "service_journal",
+        "docker_ps",
+        "docker_logs_tail",
+        "docker_logs_since",
+        "docker_compose_logs",
+        "docker_stats",
+        "journal_errors",
+        "kernel_oom_events",
+        "kernel_messages",
+        "failed_services",
+        "disk_usage",
+        "disk_inodes",
+        "memory_usage",
+        "load_average",
+        "listening_ports",
+    )
+}
+V1_CAPS.update(
+    {
+        a: 32768
+        for a in (
+            "nginx_access_tail",
+            "nginx_access_grep",
+            "nginx_rotated_log_grep",
+            "apache_access_tail",
+        )
+    }
+)
+
 
 def test_starter_policy_is_valid_and_keeps_v1_limits() -> None:
     p = parse_policy(STARTER.read_bytes())

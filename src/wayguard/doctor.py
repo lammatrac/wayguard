@@ -128,5 +128,3 @@ def run_doctor(
     _check_claude_guard(out)
     out("doctor: all checks passed" if code == EXIT_OK else "doctor: problems found")
     return code
-
-
