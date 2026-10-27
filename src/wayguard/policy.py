@@ -21,7 +21,7 @@ from typing import Any, Literal
 
 from wayguard import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_ERRORS = 50
 MAX_PATTERN_LENGTH = 256
 MAX_STRING_LENGTH = 256
@@ -29,6 +29,7 @@ MAX_ENUM_VALUES = 64
 MAX_SERVER_DESCRIPTION = 200
 MAX_ACTION_DESCRIPTION = 500
 MAX_ALIAS_LENGTH = 255
+MAX_ACTIONS_PER_PROJECT = 200
 
 ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
 PARAM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
@@ -401,46 +402,145 @@ def _check_executable(exe: object, path: str, errs: _Errors) -> None:
         errs.add(path, "executable is on the interpreter denylist")
 
 
-def _parse_server(sid: str, raw: object, defaults: Defaults | None, errs: _Errors) -> Server | None:
-    path = f"servers.{_safe_key(sid)}"
-    if not ID_RE.match(sid):
-        errs.add(path, "invalid server id")
-        return None
-    if not isinstance(raw, dict):
-        errs.add(path, "must be an object")
-        return None
-    before = len(errs.items)
-    _check_keys(raw, {"enabled", "ssh_alias", "actions"}, {"description"}, path, errs)
-    if "enabled" in raw and not isinstance(raw["enabled"], bool):
-        errs.add(f"{path}.enabled", "must be a boolean")
-    alias = raw.get("ssh_alias")
-    if "ssh_alias" in raw and (
+def _check_alias(alias: object, path: str, errs: _Errors) -> None:
+    if (
         not isinstance(alias, str)
         or not alias
         or len(alias) > MAX_ALIAS_LENGTH
         or alias.startswith("-")
         or not ALIAS_RE.match(alias)
     ):
-        errs.add(f"{path}.ssh_alias", "invalid alias")
+        errs.add(path, "invalid alias")
+
+
+def _check_short_description(desc: object, path: str, errs: _Errors) -> None:
+    if not isinstance(desc, str) or len(desc) > MAX_SERVER_DESCRIPTION or has_control_chars(desc):
+        errs.add(path, "must be a string without control characters, max 200")
+
+
+@dataclass(frozen=True)
+class _Host:
+    id: str
+    ssh_alias: str
+    description: str | None
+    use: tuple[str, ...]
+    vars: Mapping[str, str | tuple[str, ...]]
+    actions: Mapping[str, Any]  # raw action dicts
+
+
+@dataclass(frozen=True)
+class _Ctx:
+    defaults: Defaults | None
+    shared: Mapping[str, Any]
+    templates: Mapping[str, Mapping[str, Any]]
+
+
+def _parse_host(hid: str, raw: object, errs: _Errors) -> _Host | None:
+    path = f"hosts.{_safe_key(hid)}"
+    if not ID_RE.match(hid):
+        errs.add(path, "invalid host id")
+        return None
+    if not isinstance(raw, dict):
+        errs.add(path, "must be an object")
+        return None
+    before = len(errs.items)
+    _check_keys(raw, {"ssh_alias"}, {"description", "actions"}, path, errs)
+    alias = raw.get("ssh_alias")
+    if "ssh_alias" in raw:
+        _check_alias(alias, f"{path}.ssh_alias", errs)
     desc = raw.get("description")
-    if "description" in raw and (
-        not isinstance(desc, str) or len(desc) > MAX_SERVER_DESCRIPTION or has_control_chars(desc)
-    ):
-        errs.add(f"{path}.description", "must be a string without control characters, max 200")
-    actions: dict[str, Action] = {}
-    raw_actions = raw.get("actions")
+    if "description" in raw:
+        _check_short_description(desc, f"{path}.description", errs)
+    actions: dict[str, Any] = {}
     if "actions" in raw:
-        if not isinstance(raw_actions, dict):
-            errs.add(f"{path}.actions", "must be an object")
+        if isinstance(raw["actions"], dict):
+            actions = dict(raw["actions"])
         else:
-            for aid, araw in raw_actions.items():
-                a = _parse_action(aid, araw, f"{path}.actions.{_safe_key(aid)}", defaults, errs)
-                if a:
-                    actions[aid] = a
+            errs.add(f"{path}.actions", "must be an object")
+    if len(errs.items) > before:
+        return None
+    return _Host(
+        id=hid, ssh_alias=str(alias), description=desc if isinstance(desc, str) else None,
+        use=(), vars={}, actions=actions,
+    )  # fmt: skip
+
+
+def _resolve_action(
+    raw: object,
+    scope: Mapping[str, str | tuple[str, ...]],
+    ctx: _Ctx,
+    path: str,
+    errs: _Errors,
+) -> object:
+    """Hook for shared parameters (Task 3) and variables (Task 5); identity for now."""
+    return raw
+
+
+def _expand_project(
+    pid: str, raw: object, hosts: Mapping[str, _Host], ctx: _Ctx, errs: _Errors
+) -> Server | None:
+    path = f"projects.{_safe_key(pid)}"
+    if not ID_RE.match(pid):
+        errs.add(path, "invalid project id")
+        return None
+    if not isinstance(raw, dict):
+        errs.add(path, "must be an object")
+        return None
+    before = len(errs.items)
+    _check_keys(raw, {"enabled", "host"}, {"description", "actions", "disable"}, path, errs)
+    if "enabled" in raw and not isinstance(raw["enabled"], bool):
+        errs.add(f"{path}.enabled", "must be a boolean")
+    host: _Host | None = None
+    if "host" in raw:
+        href = raw["host"]
+        if isinstance(href, str) and href in hosts:
+            host = hosts[href]
+        else:
+            errs.add(f"{path}.host", "unknown host")
+    desc = raw.get("description")
+    if "description" in raw:
+        _check_short_description(desc, f"{path}.description", errs)
+    raw_actions = raw.get("actions", {})
+    if not isinstance(raw_actions, dict):
+        errs.add(f"{path}.actions", "must be an object")
+        raw_actions = {}
+    disable: list[str] = []
+    if "disable" in raw:
+        if isinstance(raw["disable"], list) and all(isinstance(x, str) for x in raw["disable"]):
+            disable = raw["disable"]
+        else:
+            errs.add(f"{path}.disable", "must be a list of strings")
+    if host is None or len(errs.items) > before:
+        return None
+
+    sources: list[tuple[str, Mapping[str, Any]]] = [
+        (f"hosts.{_safe_key(host.id)}.actions", host.actions),
+        (f"{path}.actions", raw_actions),
+    ]
+    first: dict[str, str] = {}
+    actions: dict[str, Action] = {}
+    for base, group in sources:
+        for aid, araw in group.items():
+            apath = f"{base}.{_safe_key(aid)}"
+            if aid in first:
+                errs.add(apath, f"duplicate action id (also defined in {first[aid]})")
+                continue
+            first[aid] = apath
+            resolved = _resolve_action(araw, host.vars, ctx, apath, errs)
+            a = _parse_action(aid, resolved, apath, ctx.defaults, errs)
+            if a:
+                actions[aid] = a
+    for did in disable:
+        if did in first:
+            actions.pop(did, None)
+        else:
+            errs.add(f"{path}.disable", f"unknown action '{_safe_key(did)}'")
+    if len(first) > MAX_ACTIONS_PER_PROJECT:
+        errs.add(path, f"too many actions (max {MAX_ACTIONS_PER_PROJECT})")
     if len(errs.items) > before:
         return None
     return Server(
-        id=sid, enabled=bool(raw["enabled"]), ssh_alias=str(alias),
+        id=pid, enabled=bool(raw["enabled"]), ssh_alias=host.ssh_alias,
         description=desc if isinstance(desc, str) else None, actions=actions,
     )  # fmt: skip
 
@@ -461,19 +561,29 @@ def parse_policy(data: bytes, path: Path | None = None) -> Policy:
     errs = _Errors()
     if not isinstance(doc, dict):
         raise PolicyInvalidError(["$: must be a JSON object"])
-    _check_keys(doc, {"version", "defaults", "servers"}, set(), "$", errs)
+    _check_keys(doc, {"version", "defaults", "hosts", "projects"}, set(), "$", errs)
     if "version" in doc and (not _is_int(doc["version"]) or doc["version"] != SCHEMA_VERSION):
         errs.add("version", f"must be {SCHEMA_VERSION}")
     defaults = _parse_defaults(doc["defaults"], errs) if "defaults" in doc else None
-    servers: dict[str, Server] = {}
-    if "servers" in doc:
-        if not isinstance(doc["servers"], dict):
-            errs.add("servers", "must be an object")
+    hosts: dict[str, _Host] = {}
+    if "hosts" in doc:
+        if not isinstance(doc["hosts"], dict):
+            errs.add("hosts", "must be an object")
         else:
-            for sid, sraw in doc["servers"].items():
-                s = _parse_server(sid, sraw, defaults, errs)
+            for hid, hraw in doc["hosts"].items():
+                h = _parse_host(hid, hraw, errs)
+                if h:
+                    hosts[hid] = h
+    ctx = _Ctx(defaults=defaults, shared={}, templates={})
+    servers: dict[str, Server] = {}
+    if "projects" in doc:
+        if not isinstance(doc["projects"], dict):
+            errs.add("projects", "must be an object")
+        else:
+            for pid, praw in doc["projects"].items():
+                s = _expand_project(pid, praw, hosts, ctx, errs)
                 if s:
-                    servers[sid] = s
+                    servers[pid] = s
     if errs.items or defaults is None:
         raise PolicyInvalidError(errs.items or ["defaults: invalid"])
     return Policy(

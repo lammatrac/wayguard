@@ -1,15 +1,18 @@
 {
-  "version": 1,
+  "version": 2,
   "defaults": {
     "decision": "deny",
     "timeout_seconds": 20,
     "max_output_bytes": 65536,
     "max_concurrent_actions": 2
   },
-  "servers": {
+  "hosts": {
+    "web-prod-host": { "ssh_alias": "web-prod-debug" }
+  },
+  "projects": {
     "web-prod": {
       "enabled": false,
-      "ssh_alias": "web-prod-debug",
+      "host": "web-prod-host",
       "description": "Production web server (edit: what runs here, which project it belongs to)",
       "actions": {
         "nginx_error_tail": {

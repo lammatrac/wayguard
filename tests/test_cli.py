@@ -53,7 +53,7 @@ def test_init_creates_layout_and_empty_policy(root: Path) -> None:
     assert mode(root / "state") == 0o700
     p = root / "policy.json"
     assert mode(p) == 0o600
-    assert json.loads(p.read_text())["servers"] == {}
+    assert json.loads(p.read_text())["projects"] == {}
     assert policy_mod.load_policy(root).servers == {}
 
 
@@ -77,7 +77,7 @@ def test_init_force_keeps_backup(root: Path) -> None:
     assert len(backups) == 1
     assert backups[0].read_bytes() == b'{"custom": true}'
     assert mode(backups[0]) == 0o600
-    assert json.loads(p.read_text())["servers"] == {}
+    assert json.loads(p.read_text())["projects"] == {}
 
 
 def write(root: Path, d: object, m: int = 0o600) -> None:
@@ -97,7 +97,7 @@ def test_validate_invalid_exit_code_and_message(
     root: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     d = good()
-    d["version"] = 2
+    d["version"] = 1
     write(root, d)
     assert cli.main(["policy", "validate"]) == cli.EXIT_INVALID_POLICY
     assert "version" in capsys.readouterr().err

@@ -13,7 +13,7 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import CallToolResult
 
-from tests.test_policy import dump, good
+from tests.test_policy import add_server, dump, good
 from wayguard import config, mcp_server
 from wayguard.command import discover_ssh
 
@@ -106,12 +106,12 @@ def test_status_valid_and_enforcement(tmp_path: Path) -> None:
     assert st["validation"] == "valid" and st["errors"] == []
     assert st["enforcement"] == "local-policy-only"
     assert st["policy_changed_since_load"] is False
-    assert st["schema_version"] == 1 and st["loaded_at"]
+    assert st["schema_version"] == 2 and st["loaded_at"]
 
 
 def test_list_actions_denies_unknown_and_disabled(tmp_path: Path) -> None:
     d = good()
-    d["servers"]["off"] = {"enabled": False, "ssh_alias": "x", "actions": {}}
+    add_server(d, "off", enabled=False, ssh_alias="x", actions={})
     root = setup_root(tmp_path, dump(d))
 
     async def fn(s: Any) -> list[dict[str, Any]]:
@@ -201,7 +201,7 @@ def test_policy_lifecycle_no_hot_reload(tmp_path: Path) -> None:
 
     async def fn(s: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         d = good()
-        d["servers"] = {}
+        d["projects"] = {}
         config.atomic_write(config.policy_path(root), dump(d))
         run = sc(await s.call_tool("run_action", RUN))
         st = sc(await s.call_tool("get_policy_status", {}))

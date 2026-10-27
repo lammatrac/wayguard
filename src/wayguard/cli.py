@@ -16,14 +16,15 @@ EXIT_DENIED = 3
 EXIT_OPERATIONAL = 4
 
 SAMPLE_POLICY = b"""{
-  "version": 1,
+  "version": 2,
   "defaults": {
     "decision": "deny",
     "timeout_seconds": 15,
     "max_output_bytes": 32768,
     "max_concurrent_actions": 2
   },
-  "servers": {}
+  "hosts": {},
+  "projects": {}
 }
 """
 
@@ -169,7 +170,8 @@ def _cmd_validate() -> int:
     if pol is None:
         return code
     n = sum(len(s.actions) for s in pol.servers.values())
-    print(f"policy valid: {len(pol.servers)} server(s), {n} action(s)")
+    hosts = len({s.ssh_alias for s in pol.servers.values()})
+    print(f"policy valid: {len(pol.servers)} project(s) on {hosts} host(s), {n} action(s)")
     return EXIT_OK
 
 

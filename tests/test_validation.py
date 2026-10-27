@@ -2,7 +2,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_policy import dump, good
+from tests.test_policy import add_server, dump, good
 from wayguard import validation
 from wayguard.policy import Policy, parse_policy
 from wayguard.validation import (
@@ -16,18 +16,16 @@ from wayguard.validation import (
 
 def make_policy() -> Policy:
     d = good()
-    d["servers"]["prod"]["actions"]["grep"] = {
+    d["projects"]["prod"]["actions"]["grep"] = {
         "description": "grep",
         "risk": "read-only",
         "executable": "/usr/bin/grep",
         "args": ["-e", "{pat}", "--", "/var/log/x.log"],
         "parameters": {"pat": {"type": "string", "max_length": 32, "pattern": r"[\s\S]*"}},
     }
-    d["servers"]["off"] = {
-        "enabled": False,
-        "ssh_alias": "off-host",
-        "actions": d["servers"]["prod"]["actions"],
-    }
+    add_server(
+        d, "off", enabled=False, ssh_alias="off-host", actions=d["projects"]["prod"]["actions"]
+    )
     return parse_policy(dump(d))
 
 

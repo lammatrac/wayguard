@@ -61,19 +61,25 @@ def _policy(extra_servers: dict[str, Any]) -> dict[str, Any]:
         "args": ["-n", "{lines}", "--", "/var/log/nginx/error.log"],
         "parameters": {"lines": {"type": "integer", "minimum": 1, "maximum": 50}},
     }
-    servers = {
-        sid: {"enabled": True, "ssh_alias": alias, "actions": {"nginx_error_tail": tail}}
+    hosts = {f"{alias}-host": {"ssh_alias": alias} for alias in set(extra_servers.values())}
+    projects = {
+        sid: {
+            "enabled": True,
+            "host": f"{alias}-host",
+            "actions": {"nginx_error_tail": tail},
+        }
         for sid, alias in extra_servers.items()
     }
     return {
-        "version": 1,
+        "version": 2,
         "defaults": {
             "decision": "deny",
             "timeout_seconds": 20,
             "max_output_bytes": 32768,
             "max_concurrent_actions": 2,
         },
-        "servers": servers,
+        "hosts": hosts,
+        "projects": projects,
     }
 
 

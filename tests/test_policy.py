@@ -12,17 +12,18 @@ from wayguard.policy import PolicyInvalidError, parse_policy
 
 def good() -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "defaults": {
             "decision": "deny",
             "timeout_seconds": 15,
             "max_output_bytes": 32768,
             "max_concurrent_actions": 2,
         },
-        "servers": {
+        "hosts": {"prod-host": {"ssh_alias": "prod-debug"}},
+        "projects": {
             "prod": {
                 "enabled": True,
-                "ssh_alias": "prod-debug",
+                "host": "prod-host",
                 "description": "Production",
                 "actions": {
                     "tail": {
@@ -57,8 +58,25 @@ def dump(d: dict[str, Any]) -> bytes:
 
 
 def action(d: dict[str, Any]) -> dict[str, Any]:
-    a: dict[str, Any] = d["servers"]["prod"]["actions"]["tail"]
+    a: dict[str, Any] = d["projects"]["prod"]["actions"]["tail"]
     return a
+
+
+def add_server(
+    d: dict[str, Any],
+    sid: str,
+    *,
+    enabled: bool,
+    ssh_alias: str,
+    actions: dict[str, Any],
+    description: str | None = None,
+) -> None:
+    """Add host `<sid>-host` (with `ssh_alias`) and a project `sid` using it."""
+    d["hosts"][f"{sid}-host"] = {"ssh_alias": ssh_alias}
+    proj: dict[str, Any] = {"enabled": enabled, "host": f"{sid}-host", "actions": actions}
+    if description is not None:
+        proj["description"] = description
+    d["projects"][sid] = proj
 
 
 def test_valid_policy_builds_model() -> None:
@@ -76,6 +94,49 @@ def test_valid_policy_builds_model() -> None:
     assert u.parameters["unit"].values == ("nginx", "php")
     assert u.parameters["name"].pattern == "[a-z]+"
     assert len(p.sha256) == 64
+
+
+def test_two_projects_share_host() -> None:
+    d = good()
+    disk = {**copy.deepcopy(action(d)), "description": "Disk"}
+    d["hosts"]["prod-host"]["actions"] = {"disk": disk}
+    d["projects"]["b"] = {"enabled": True, "host": "prod-host"}
+    d["projects"]["a"] = {"enabled": True, "host": "prod-host"}
+    p = parse_policy(dump(d))
+    for pid in ("a", "b"):
+        assert p.servers[pid].ssh_alias == "prod-debug"
+        assert "disk" in p.servers[pid].actions
+    assert "prod-host" not in p.servers
+
+
+def test_disabled_project_still_validated() -> None:
+    d = good()
+    d["projects"]["prod"]["enabled"] = False
+    action(d)["executable"] = "/bin/bash"
+    with pytest.raises(PolicyInvalidError):
+        parse_policy(dump(d))
+
+
+def test_disable_host_action_per_project() -> None:
+    d = good()
+    d["hosts"]["prod-host"]["actions"] = {"disk": copy.deepcopy(action(d))}
+    d["projects"]["a"] = {"enabled": True, "host": "prod-host", "disable": ["disk"]}
+    d["projects"]["b"] = {"enabled": True, "host": "prod-host"}
+    p = parse_policy(dump(d))
+    assert "disk" not in p.servers["a"].actions
+    assert "disk" in p.servers["b"].actions
+
+
+def test_duplicate_action_error_names_first_source() -> None:
+    d = good()
+    d["hosts"]["prod-host"]["actions"] = {"tail": copy.deepcopy(action(d))}
+    with pytest.raises(PolicyInvalidError) as e:
+        parse_policy(dump(d))
+    assert any(
+        x.startswith("projects.prod.actions.tail: duplicate action id")
+        and "hosts.prod-host.actions.tail" in x
+        for x in e.value.errors
+    )
 
 
 def test_action_cap_above_default_within_ceiling() -> None:
@@ -102,27 +163,53 @@ def mutations() -> list[tuple[str, Any]]:
         return run
 
     def srv(d: dict[str, Any]) -> dict[str, Any]:
-        s: dict[str, Any] = d["servers"]["prod"]
+        s: dict[str, Any] = d["projects"]["prod"]
         return s
+
+    def host(d: dict[str, Any]) -> dict[str, Any]:
+        h: dict[str, Any] = d["hosts"]["prod-host"]
+        return h
 
     cases: list[tuple[str, Any]] = [
         ("unknown_top", f(lambda d: d.update(extra=1))),
         ("unknown_defaults", f(lambda d: d["defaults"].update(extra=1))),
-        ("unknown_server", f(lambda d: srv(d).update(extra=1))),
+        ("unknown_project_field", f(lambda d: srv(d).update(extra=1))),
+        ("unknown_host_field", f(lambda d: host(d).update(extra=1))),
         ("unknown_action", f(lambda d: action(d).update(extra=1))),
         ("unknown_param", f(lambda d: action(d)["parameters"]["lines"].update(extra=1))),
-        ("version2", f(lambda d: d.update(version=2))),
+        ("version1", f(lambda d: d.update(version=1))),
+        ("missing_hosts", f(lambda d: d.pop("hosts"))),
+        ("missing_projects", f(lambda d: d.pop("projects"))),
+        ("servers_present", f(lambda d: d.update(servers={}))),
+        ("unknown_host_ref", f(lambda d: srv(d).update(host="nope"))),
+        ("host_alias_dash", f(lambda d: host(d).update(ssh_alias="-oProxyCommand=x"))),
+        ("project_enabled_not_bool", f(lambda d: srv(d).update(enabled="yes"))),
+        (
+            "dup_id_host_vs_project",
+            f(lambda d: host(d).update(actions={"tail": copy.deepcopy(action(d))})),
+        ),
+        ("disable_unknown", f(lambda d: srv(d).update(disable=["nope"]))),
+        ("disable_not_list", f(lambda d: srv(d).update(disable="tail"))),
+        (
+            "too_many_actions",
+            f(
+                lambda d: srv(d)["actions"].update(
+                    {f"a{i}": copy.deepcopy(action(d)) for i in range(201)}
+                )
+            ),
+        ),
         ("version_bool", f(lambda d: d.update(version=True))),
         ("missing_defaults", f(lambda d: d.pop("defaults"))),
-        ("missing_alias", f(lambda d: srv(d).pop("ssh_alias"))),
+        ("missing_alias", f(lambda d: host(d).pop("ssh_alias"))),
         ("decision_allow", f(lambda d: d["defaults"].update(decision="allow"))),
-        ("bad_server_id", f(lambda d: d["servers"].update({"-x": srv(d)}))),
+        ("bad_project_id", f(lambda d: d["projects"].update({"-x": srv(d)}))),
+        ("bad_host_id", f(lambda d: d["hosts"].update({"-x": host(d)}))),
         ("bad_action_id", f(lambda d: srv(d)["actions"].update({"a b": action(d)}))),
-        ("alias_dash", f(lambda d: srv(d).update(ssh_alias="-oProxyCommand=x"))),
-        ("alias_empty", f(lambda d: srv(d).update(ssh_alias=""))),
-        ("alias_space", f(lambda d: srv(d).update(ssh_alias="a b"))),
-        ("alias_meta", f(lambda d: srv(d).update(ssh_alias="a;b"))),
-        ("alias_ctrl", f(lambda d: srv(d).update(ssh_alias="a\nb"))),
+        ("alias_dash", f(lambda d: host(d).update(ssh_alias="-oProxyCommand=x"))),
+        ("alias_empty", f(lambda d: host(d).update(ssh_alias=""))),
+        ("alias_space", f(lambda d: host(d).update(ssh_alias="a b"))),
+        ("alias_meta", f(lambda d: host(d).update(ssh_alias="a;b"))),
+        ("alias_ctrl", f(lambda d: host(d).update(ssh_alias="a\nb"))),
         ("risk_write", f(lambda d: action(d).update(risk="write"))),
         ("timeout_zero", f(lambda d: d["defaults"].update(timeout_seconds=0))),
         ("timeout_121", f(lambda d: d["defaults"].update(timeout_seconds=121))),
@@ -159,7 +246,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "enum_empty",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
                     values=[]
                 )
             ),
@@ -167,7 +254,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "enum_dash",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
                     values=["-x"]
                 )
             ),
@@ -175,7 +262,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "enum_dotdot",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
                     values=["a/../b"]
                 )
             ),
@@ -183,7 +270,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "enum_ctrl",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
                     values=["a\tb"]
                 )
             ),
@@ -191,7 +278,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "enum_toolong",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
                     values=["a" * 257]
                 )
             ),
@@ -199,7 +286,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "enum_65",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["unit"].update(
                     values=[str(i) for i in range(65)]
                 )
             ),
@@ -207,7 +294,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "str_maxlen_0",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["name"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["name"].update(
                     max_length=0
                 )
             ),
@@ -215,7 +302,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "str_maxlen_257",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["name"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["name"].update(
                     max_length=257
                 )
             ),
@@ -223,7 +310,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "str_bad_regex",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["name"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["name"].update(
                     pattern="("
                 )
             ),
@@ -231,7 +318,7 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "str_long_pattern",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["name"].update(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["name"].update(
                     pattern="a" * 257
                 )
             ),
@@ -239,12 +326,13 @@ def mutations() -> list[tuple[str, Any]]:
         (
             "str_missing_pattern",
             f(
-                lambda d: d["servers"]["prod"]["actions"]["unit"]["parameters"]["name"].pop(
+                lambda d: d["projects"]["prod"]["actions"]["unit"]["parameters"]["name"].pop(
                     "pattern"
                 )
             ),
         ),
-        ("servers_not_dict", f(lambda d: d.update(servers=[]))),
+        ("projects_not_dict", f(lambda d: d.update(projects=[]))),
+        ("hosts_not_dict", f(lambda d: d.update(hosts=[]))),
     ]
     for name in policy.DENYLIST_SAMPLES:
         cases.append(
@@ -274,7 +362,7 @@ def test_non_utf8_and_non_object_rejected() -> None:
 
 
 def test_duplicate_keys_rejected() -> None:
-    raw = b'{"version":1,"version":1}'
+    raw = b'{"version":2,"version":2}'
     with pytest.raises(PolicyInvalidError):
         parse_policy(raw)
 
@@ -342,12 +430,16 @@ def test_denylist_covers_spec_names() -> None:
 
 def test_error_messages_sanitized_and_name_path() -> None:
     d = good()
-    d["servers"]["prod"]["actions"]["tail"]["executable"] = "/bin/SECRET\x1b[31m bash"
-    d["servers"]["prod"]["ssh_alias"] = "SECRETALIAS;rm"
+    d["projects"]["prod"]["actions"]["tail"]["executable"] = "/bin/SECRET\x1b[31m bash"
     with pytest.raises(PolicyInvalidError) as e:
         parse_policy(dump(d))
     text = "\n".join(e.value.errors)
-    assert "servers.prod.actions.tail.executable" in text
+    d["hosts"]["prod-host"]["ssh_alias"] = "SECRETALIAS;rm"
+    with pytest.raises(PolicyInvalidError) as e2:
+        parse_policy(dump(d))
+    text += "\n".join(e2.value.errors)
+    assert "hosts.prod-host.ssh_alias" in text
+    assert "projects.prod.actions.tail.executable" in text
     assert "SECRET" not in text
     assert "\x1b" not in text
 
@@ -364,7 +456,7 @@ def test_unknown_key_name_is_escaped_in_error() -> None:
 
 def test_error_list_capped() -> None:
     d = good()
-    d["servers"] = {f"-{i}": {} for i in range(500)}
+    d["projects"] = {f"-{i}": {} for i in range(500)}
     with pytest.raises(PolicyInvalidError) as e:
         parse_policy(dump(d))
     assert len(e.value.errors) <= policy.MAX_ERRORS
@@ -436,7 +528,7 @@ def test_load_missing(tmp_path: Path) -> None:
 def test_load_invalid_raises_invalid(tmp_path: Path) -> None:
     root = tmp_path / "wg"
     d = good()
-    d["version"] = 2
+    d["version"] = 1
     write_policy(root, d)
     with pytest.raises(PolicyInvalidError):
         policy.load_policy(root)
