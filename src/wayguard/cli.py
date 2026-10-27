@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     lst = act_sub.add_parser("list", help="list configured actions (no ssh aliases shown)")
     lst.add_argument("--server", metavar="ID", default=None)
 
+    sub.add_parser("serve", help="run the MCP server on stdio")
+
     aud = sub.add_parser("audit", help="audit log tools")
     aud_sub = aud.add_subparsers(dest="audit_command", required=True)
     tl = aud_sub.add_parser("tail", help="print the last audit lines")
@@ -182,6 +184,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "serve":
+            from wayguard import mcp_server  # lazy: keep other commands import-light
+
+            return mcp_server.serve(default_root())
         if args.command == "init":
             return _cmd_init(args.force)
         if args.command == "policy":
