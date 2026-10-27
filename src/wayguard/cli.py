@@ -5,7 +5,7 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from wayguard import __version__, config
+from wayguard import __version__, audit, config, proposals
 from wayguard import policy as policy_mod
 from wayguard.config import default_root
 
@@ -47,7 +47,36 @@ def build_parser() -> argparse.ArgumentParser:
     act_sub = act.add_subparsers(dest="actions_command", required=True)
     lst = act_sub.add_parser("list", help="list configured actions (no ssh aliases shown)")
     lst.add_argument("--server", metavar="ID", default=None)
+
+    aud = sub.add_parser("audit", help="audit log tools")
+    aud_sub = aud.add_subparsers(dest="audit_command", required=True)
+    tl = aud_sub.add_parser("tail", help="print the last audit lines")
+    tl.add_argument("--limit", type=_positive_int, default=20, metavar="N")
+    pr = aud_sub.add_parser("prune", help="delete audit lines older than DAYS")
+    pr.add_argument("--older-than", type=_positive_int, required=True, metavar="DAYS")
+
+    prop = sub.add_parser("proposals", help="review action proposals (human only)")
+    prop_sub = prop.add_subparsers(dest="proposals_command", required=True)
+    pl = prop_sub.add_parser("list", help="list pending proposals")
+    pl.add_argument("--all", action="store_true", help="include dismissed and done")
+    for name, helptext in (
+        ("show", "show one proposal"),
+        ("dismiss", "mark a pending proposal dismissed (terminal)"),
+        ("mark-done", "mark a pending proposal done (terminal)"),
+    ):
+        pp = prop_sub.add_parser(name, help=helptext)
+        pp.add_argument("id", metavar="ID")
     return parser
+
+
+def _positive_int(value: str) -> int:
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer >= 1") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be an integer >= 1")
+    return n
 
 
 def _err(msg: str) -> None:
@@ -110,6 +139,45 @@ def _cmd_actions_list(server: str | None) -> int:
     return EXIT_OK
 
 
+def _cmd_audit(args: argparse.Namespace) -> int:
+    root = default_root()
+    if args.audit_command == "tail":
+        for line in audit.tail(root, args.limit):
+            print(line)
+        return EXIT_OK
+    print(audit.prune(root, older_than_days=args.older_than))
+    return EXIT_OK
+
+
+def _cmd_proposals(args: argparse.Namespace) -> int:
+    root = default_root()
+    cmd = args.proposals_command
+    try:
+        if cmd == "list":
+            for d in proposals.list_proposals(root, include_all=args.all):
+                print(f"{d['id']}  {d.get('status')}  {d.get('created_at')}  "
+                      f"{d.get('server_id')}  {str(d.get('goal'))[:60]!r}")  # fmt: skip
+            return EXIT_OK
+        if cmd == "show":
+            d = proposals.get_proposal(root, args.id)
+            for key, val in d.items():
+                print(f"{key}: {val}")
+            return EXIT_OK
+        new = "dismissed" if cmd == "dismiss" else "done"
+        d = proposals.set_status(root, args.id, new)
+        print(f"{d['id']}: {d['status']}")
+        return EXIT_OK
+    except proposals.InvalidProposalIdError:
+        _err("invalid proposal id")
+        return EXIT_DENIED
+    except proposals.ProposalNotFoundError:
+        _err("proposal not found")
+        return EXIT_DENIED
+    except proposals.ProposalStateError:
+        _err("proposal is already in a terminal state; status cannot change")
+        return EXIT_OPERATIONAL
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -120,6 +188,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_validate()
         if args.command == "actions":
             return _cmd_actions_list(args.server)
+        if args.command == "audit":
+            return _cmd_audit(args)
+        if args.command == "proposals":
+            return _cmd_proposals(args)
         parser.print_help()
         return EXIT_OK
     except OSError:
