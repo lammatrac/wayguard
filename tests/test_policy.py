@@ -426,3 +426,9 @@ def test_load_invalid_raises_invalid(tmp_path: Path) -> None:
     write_policy(root, d)
     with pytest.raises(PolicyInvalidError):
         policy.load_policy(root)
+
+
+def test_starter_template_is_valid() -> None:
+    path = Path(__file__).resolve().parent.parent / "examples" / "policy.starter.json"
+    p = parse_policy(path.read_bytes())
+    assert not p.servers["web-prod"].enabled  # copied template grants nothing until enabled

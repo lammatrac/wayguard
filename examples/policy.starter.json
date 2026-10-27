@@ -1,0 +1,297 @@
+{
+  "version": 1,
+  "defaults": {
+    "decision": "deny",
+    "timeout_seconds": 20,
+    "max_output_bytes": 65536,
+    "max_concurrent_actions": 2
+  },
+  "servers": {
+    "web-prod": {
+      "enabled": false,
+      "ssh_alias": "web-prod-debug",
+      "description": "Production web server (edit: what runs here, which project it belongs to)",
+      "actions": {
+        "nginx_error_tail": {
+          "description": "Last N lines of the Nginx error log",
+          "risk": "read-only",
+          "executable": "/usr/bin/tail",
+          "args": ["-n", "{lines}", "--", "/var/log/nginx/error.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 500 }
+          }
+        },
+        "nginx_access_tail": {
+          "description": "Last N lines of the Nginx access log (contains client IPs)",
+          "risk": "read-only",
+          "executable": "/usr/bin/tail",
+          "args": ["-n", "{lines}", "--", "/var/log/nginx/access.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 200 }
+          },
+          "max_output_bytes": 32768
+        },
+        "nginx_access_grep": {
+          "description": "First N access-log lines matching a predefined pattern: 5xx responses, 502/504 only, 499 client aborts, or 404s",
+          "risk": "read-only",
+          "executable": "/usr/bin/grep",
+          "args": ["-m", "{lines}", "-E", "-e", "{pattern}", "--", "/var/log/nginx/access.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 200 },
+            "pattern": {
+              "type": "enum",
+              "values": ["\" 5[0-9]{2} ", "\" 50[24] ", "\" 499 ", "\" 404 "]
+            }
+          },
+          "max_output_bytes": 32768
+        },
+        "nginx_error_grep": {
+          "description": "First N error-log lines matching a predefined upstream/connection error pattern",
+          "risk": "read-only",
+          "executable": "/usr/bin/grep",
+          "args": ["-m", "{lines}", "-i", "-e", "{pattern}", "--", "/var/log/nginx/error.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 200 },
+            "pattern": {
+              "type": "enum",
+              "values": ["upstream timed out", "connect() failed", "no live upstreams", "upstream prematurely closed", "worker_connections are not enough"]
+            }
+          }
+        },
+        "nginx_rotated_log_read": {
+          "description": "Read a rotated, gzip-compressed Nginx log (output is capped, so very large files are truncated)",
+          "risk": "read-only",
+          "executable": "/usr/bin/zcat",
+          "args": ["--", "{file}"],
+          "parameters": {
+            "file": {
+              "type": "enum",
+              "values": ["/var/log/nginx/error.log.2.gz", "/var/log/nginx/error.log.3.gz", "/var/log/nginx/access.log.2.gz", "/var/log/nginx/access.log.3.gz"]
+            }
+          }
+        },
+        "nginx_rotated_log_grep": {
+          "description": "First N lines matching a predefined 5xx pattern in a rotated, gzip-compressed Nginx access log",
+          "risk": "read-only",
+          "executable": "/usr/bin/zgrep",
+          "args": ["-m", "{lines}", "-E", "-e", "{pattern}", "--", "{file}"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 200 },
+            "pattern": { "type": "enum", "values": ["\" 5[0-9]{2} ", "\" 50[24] "] },
+            "file": {
+              "type": "enum",
+              "values": ["/var/log/nginx/access.log.2.gz", "/var/log/nginx/access.log.3.gz"]
+            }
+          },
+          "max_output_bytes": 32768
+        },
+        "nginx_config_test": {
+          "description": "Check Nginx configuration syntax (often needs read access to certificates; may fail for an unprivileged account)",
+          "risk": "read-only",
+          "executable": "/usr/sbin/nginx",
+          "args": ["-t"],
+          "parameters": {}
+        },
+        "apache_error_tail": {
+          "description": "Last N lines of the Apache error log (RHEL: /var/log/httpd/error_log)",
+          "risk": "read-only",
+          "executable": "/usr/bin/tail",
+          "args": ["-n", "{lines}", "--", "/var/log/apache2/error.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 500 }
+          }
+        },
+        "apache_access_tail": {
+          "description": "Last N lines of the Apache access log (contains client IPs; RHEL: /var/log/httpd/access_log)",
+          "risk": "read-only",
+          "executable": "/usr/bin/tail",
+          "args": ["-n", "{lines}", "--", "/var/log/apache2/access.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 200 }
+          },
+          "max_output_bytes": 32768
+        },
+        "apache_php_fatal_grep": {
+          "description": "First N 'PHP Fatal' lines in the Apache error log",
+          "risk": "read-only",
+          "executable": "/usr/bin/grep",
+          "args": ["-m", "{lines}", "-i", "-e", "PHP Fatal", "--", "/var/log/apache2/error.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 200 }
+          }
+        },
+        "apache_config_test": {
+          "description": "Check Apache configuration syntax (may need elevated read access)",
+          "risk": "read-only",
+          "executable": "/usr/sbin/apachectl",
+          "args": ["configtest"],
+          "parameters": {}
+        },
+        "apache_vhosts": {
+          "description": "Show parsed Apache virtual host settings",
+          "risk": "read-only",
+          "executable": "/usr/sbin/apachectl",
+          "args": ["-S"],
+          "parameters": {}
+        },
+        "php_fpm_error_tail": {
+          "description": "Last N lines of the PHP-FPM error log (edit the PHP version in the path)",
+          "risk": "read-only",
+          "executable": "/usr/bin/tail",
+          "args": ["-n", "{lines}", "--", "/var/log/php8.2-fpm.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 500 }
+          }
+        },
+        "php_fpm_slow_tail": {
+          "description": "Last N lines of the PHP-FPM slow log (requires slowlog to be enabled in the pool config)",
+          "risk": "read-only",
+          "executable": "/usr/bin/tail",
+          "args": ["-n", "{lines}", "--", "/var/log/php8.2-fpm-slow.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 500 }
+          }
+        },
+        "wordpress_debug_tail": {
+          "description": "Last N lines of the WordPress debug log (edit the site path)",
+          "risk": "read-only",
+          "executable": "/usr/bin/tail",
+          "args": ["-n", "{lines}", "--", "/var/www/html/wp-content/debug.log"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 500 }
+          }
+        },
+        "service_status": {
+          "description": "systemd status of one web service",
+          "risk": "read-only",
+          "executable": "/usr/bin/systemctl",
+          "args": ["status", "--no-pager", "--", "{unit}"],
+          "parameters": {
+            "unit": { "type": "enum", "values": ["nginx", "apache2", "php8.2-fpm", "docker"] }
+          }
+        },
+        "service_journal": {
+          "description": "Journal lines for one web service within a time window (needs systemd-journal or adm group)",
+          "risk": "read-only",
+          "executable": "/usr/bin/journalctl",
+          "args": ["--no-pager", "-o", "short-iso", "-u", "{unit}", "--since", "{window}", "-n", "{lines}"],
+          "parameters": {
+            "unit": { "type": "enum", "values": ["nginx", "apache2", "php8.2-fpm", "docker"] },
+            "window": { "type": "enum", "values": ["15 min ago", "1 hour ago", "6 hours ago", "today"] },
+            "lines": { "type": "integer", "minimum": 1, "maximum": 500 }
+          }
+        },
+        "docker_ps": {
+          "description": "List all containers with status and exit codes (restart loops, 'Exited (137)' = killed/OOM)",
+          "risk": "read-only",
+          "executable": "/usr/bin/docker",
+          "args": ["ps", "-a"],
+          "parameters": {}
+        },
+        "docker_logs_tail": {
+          "description": "Last N log lines of one container, with timestamps",
+          "risk": "read-only",
+          "executable": "/usr/bin/docker",
+          "args": ["logs", "--tail", "{lines}", "--timestamps", "{container}"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 500 },
+            "container": { "type": "enum", "values": ["app", "web", "db"] }
+          }
+        },
+        "docker_logs_since": {
+          "description": "Log lines of one container within a time window, with timestamps",
+          "risk": "read-only",
+          "executable": "/usr/bin/docker",
+          "args": ["logs", "--since", "{window}", "--timestamps", "{container}"],
+          "parameters": {
+            "window": { "type": "enum", "values": ["15m", "30m", "1h", "6h"] },
+            "container": { "type": "enum", "values": ["app", "web", "db"] }
+          }
+        },
+        "docker_compose_logs": {
+          "description": "Last N log lines of one Compose service (edit the compose file path)",
+          "risk": "read-only",
+          "executable": "/usr/bin/docker",
+          "args": ["compose", "-f", "/srv/app/compose.yml", "logs", "--no-color", "--tail", "{lines}", "{service}"],
+          "parameters": {
+            "lines": { "type": "integer", "minimum": 1, "maximum": 500 },
+            "service": { "type": "enum", "values": ["app", "web", "db"] }
+          }
+        },
+        "docker_stats": {
+          "description": "One-shot CPU and memory usage per container",
+          "risk": "read-only",
+          "executable": "/usr/bin/docker",
+          "args": ["stats", "--no-stream"],
+          "parameters": {}
+        },
+        "journal_errors": {
+          "description": "Error-priority journal lines from all services within a time window",
+          "risk": "read-only",
+          "executable": "/usr/bin/journalctl",
+          "args": ["--no-pager", "-o", "short-iso", "-p", "err", "--since", "{window}", "-n", "{lines}"],
+          "parameters": {
+            "window": { "type": "enum", "values": ["15 min ago", "1 hour ago", "6 hours ago", "today"] },
+            "lines": { "type": "integer", "minimum": 1, "maximum": 500 }
+          }
+        },
+        "kernel_oom_events": {
+          "description": "Kernel journal lines mentioning the OOM killer since today",
+          "risk": "read-only",
+          "executable": "/usr/bin/journalctl",
+          "args": ["--no-pager", "-o", "short-iso", "-k", "--since", "today", "--grep=oom", "-n", "200"],
+          "parameters": {}
+        },
+        "kernel_messages": {
+          "description": "Kernel ring buffer with readable timestamps (fails if kernel.dmesg_restrict=1 for non-root)",
+          "risk": "read-only",
+          "executable": "/usr/bin/dmesg",
+          "args": ["-T", "--level=err,warn"],
+          "parameters": {}
+        },
+        "failed_services": {
+          "description": "List systemd units in a failed state",
+          "risk": "read-only",
+          "executable": "/usr/bin/systemctl",
+          "args": ["--failed", "--no-pager"],
+          "parameters": {}
+        },
+        "disk_usage": {
+          "description": "Filesystem space usage (a full disk often causes 500 errors)",
+          "risk": "read-only",
+          "executable": "/usr/bin/df",
+          "args": ["-h"],
+          "parameters": {}
+        },
+        "disk_inodes": {
+          "description": "Filesystem inode usage",
+          "risk": "read-only",
+          "executable": "/usr/bin/df",
+          "args": ["-i"],
+          "parameters": {}
+        },
+        "memory_usage": {
+          "description": "Memory and swap usage in MiB",
+          "risk": "read-only",
+          "executable": "/usr/bin/free",
+          "args": ["-m"],
+          "parameters": {}
+        },
+        "load_average": {
+          "description": "Uptime and load average",
+          "risk": "read-only",
+          "executable": "/usr/bin/uptime",
+          "args": [],
+          "parameters": {}
+        },
+        "listening_ports": {
+          "description": "Listening TCP sockets (process names only for the SSH account's own processes)",
+          "risk": "read-only",
+          "executable": "/usr/bin/ss",
+          "args": ["-tlnp"],
+          "parameters": {}
+        }
+      }
+    }
+  }
+}

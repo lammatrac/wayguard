@@ -60,7 +60,20 @@ What it does **not** change: it installs no system packages, background daemons,
    }
    ```
 
-   Then run `wayguard-mcp policy validate` and `wayguard-mcp actions list --server waytech-prod`. Restart the agent session after every policy change; the server loads the policy only at startup.
+   **Starter template:** [`examples/policy.starter.json`](examples/policy.starter.json) contains 31 ready-made read-only actions for Nginx, Apache, PHP-FPM, WordPress, Docker, systemd/journald, and system health (disk, memory, load, ports, OOM events). To use it:
+
+   ```bash
+   cp ~/.config/wayguard/policy.json ~/.config/wayguard/policy.json.bak   # if you already have one
+   install -m 600 examples/policy.starter.json ~/.config/wayguard/policy.json
+   ```
+
+   Then edit it: set `ssh_alias` to your alias, rename `web-prod` and write a `description` that names your project, delete the action groups you do not run, adjust paths (PHP version, site root, compose file, RHEL `httpd` paths) and enum values (systemd units, container and service names), and set `"enabled": true`. The server ships disabled so a fresh copy grants nothing. Notes:
+   - Remote executable paths are Debian/Ubuntu defaults; check them with `command -v tail grep journalctl docker` on the server.
+   - `docker_*` actions require the SSH account to be in the `docker` group, which is root-equivalent. Prefer reading container logs from journald or files, or a forced-command gateway (Section 3.4), and delete these actions otherwise.
+   - `journalctl` actions need the `systemd-journal` (or `adm`) group; `nginx_config_test`, `apache_config_test`, and `kernel_messages` often fail for an unprivileged account and can be removed.
+   - Grep actions accept only predefined patterns (enums), never free text, and return the *first* N matches in the file.
+
+   Then run `wayguard-mcp policy validate` and `wayguard-mcp actions list --server <server-id>`. Restart the agent session after every policy change; the server loads the policy only at startup.
 3. **Ask the agent.** Confirm the server is connected (`/mcp` in Claude Code), then ask by action name, for example: *"Use WayGuard to run `nginx_error_tail` on `waytech-prod` with `lines=100` and explain the errors. Do not use direct SSH."*
 
 The agent sees five tools:
