@@ -299,6 +299,199 @@ def test_use_error_messages_sanitized() -> None:
     assert "projects.prod.use: unknown template 'no?ope'" in e.value.errors
 
 
+ENUM_VAR = {"type": "enum", "values": "$c"}
+
+
+def set_vars(d: dict[str, Any], **kv: Any) -> None:
+    d["projects"]["prod"].setdefault("vars", {}).update(kv)
+
+
+def errors_of(d: dict[str, Any]) -> list[str]:
+    with pytest.raises(PolicyInvalidError) as e:
+        parse_policy(dump(d))
+    return e.value.errors
+
+
+def test_string_var_substituted_inside_arg() -> None:
+    d = good()
+    set_vars(d, project_dir="/srv/a")
+    action(d)["args"][3] = "${project_dir}/wp-content/debug.log"
+    a = parse_policy(dump(d)).servers["prod"].actions["tail"]
+    assert a.args == ("-n", "{lines}", "--", "/srv/a/wp-content/debug.log")
+
+
+def test_string_var_used_several_times_in_one_arg() -> None:
+    d = good()
+    set_vars(d, a="x", b="y")
+    action(d)["args"][3] = "/${a}/${b}/${a}.log"
+    assert parse_policy(dump(d)).servers["prod"].actions["tail"].args[3] == "/x/y/x.log"
+
+
+def test_list_var_becomes_enum() -> None:
+    d = good()
+    t = tpl_action(d)
+    t["args"] = ["logs", "{container}"]
+    t["parameters"] = {"container": {"type": "enum", "values": "$containers"}}
+    d["templates"] = {"docker": {"actions": {"logs": t}}}
+    d["projects"]["a"] = {
+        "enabled": True, "host": "prod-host", "use": ["docker"],
+        "vars": {"containers": ["a_wp", "a_db"]},
+    }  # fmt: skip
+    d["projects"]["b"] = {
+        "enabled": True, "host": "prod-host", "use": ["docker"],
+        "vars": {"containers": ["b_wp"]},
+    }  # fmt: skip
+    p = parse_policy(dump(d))
+    assert p.servers["a"].actions["logs"].parameters["container"].values == ("a_wp", "a_db")
+    assert p.servers["b"].actions["logs"].parameters["container"].values == ("b_wp",)
+
+
+def test_shared_enum_list_var_resolved_per_project() -> None:
+    d = good()
+    d["parameters"] = {"container": {"type": "enum", "values": "$containers"}}
+    t = tpl_action(d)
+    t["args"] = ["logs", "{container}"]
+    t["parameters"] = {"container": "container"}
+    d["templates"] = {"docker": {"actions": {"logs": t}}}
+    d["projects"]["a"] = {
+        "enabled": True, "host": "prod-host", "use": ["docker"], "vars": {"containers": ["x"]},
+    }  # fmt: skip
+    d["projects"]["b"] = {
+        "enabled": True, "host": "prod-host", "use": ["docker"], "vars": {"containers": ["y"]},
+    }  # fmt: skip
+    p = parse_policy(dump(d))
+    assert p.servers["a"].actions["logs"].parameters["container"].values == ("x",)
+    assert p.servers["b"].actions["logs"].parameters["container"].values == ("y",)
+
+
+def test_template_vars_per_project_and_raw_not_mutated(monkeypatch: pytest.MonkeyPatch) -> None:
+    d = good()
+    t = tpl_action(d)
+    t["args"] = ["-n", "{lines}", "--", "${dir}/debug.log"]
+    host_t = tpl_action(d)
+    host_t["args"] = ["-n", "{lines}", "--", "${dir}/host.log"]
+    d["templates"] = {"t": {"actions": {"log": t}}, "h": {"actions": {"hlog": host_t}}}
+    d["hosts"]["prod-host"].update(use=["h"], vars={"dir": "/srv/host"})
+    d["projects"]["a"] = {"enabled": True, "host": "prod-host", "use": ["t"], "vars": {"dir": "/a"}}
+    d["projects"]["b"] = {"enabled": True, "host": "prod-host", "use": ["t"], "vars": {"dir": "/b"}}
+    tpls: dict[str, Any] = {}
+    real = policy._parse_templates
+
+    def spy(raw: object, errs: Any) -> Any:
+        tpls.update(real(raw, errs))
+        return tpls
+
+    monkeypatch.setattr(policy, "_parse_templates", spy)
+    before = copy.deepcopy(d)
+    p = parse_policy(dump(d))
+    assert p.servers["a"].actions["log"].args[3] == "/a/debug.log"
+    assert p.servers["b"].actions["log"].args[3] == "/b/debug.log"
+    assert p.servers["a"].actions["hlog"].args[3] == "/srv/host/host.log"
+    assert tpls["t"]["log"] == before["templates"]["t"]["actions"]["log"]
+    assert tpls["h"]["hlog"] == before["templates"]["h"]["actions"]["hlog"]
+
+
+def test_resolve_action_does_not_mutate_input() -> None:
+    raw: dict[str, Any] = {
+        "executable": "/usr/bin/docker",
+        "args": ["logs", "${d}/x", "{c}"],
+        "parameters": {"c": {"type": "enum", "values": "$cs"}, "n": "shared"},
+    }
+    snapshot = copy.deepcopy(raw)
+    ctx = policy._Ctx(defaults=None, shared={"shared": SHARED_LINES}, templates={})
+    errs = policy._Errors()
+    out = policy._resolve_action(raw, {"d": "/srv", "cs": ("a", "b")}, ctx, "p", errs)
+    assert errs.items == []
+    assert raw == snapshot
+    assert isinstance(out, dict)
+    assert out["args"] == ["logs", "/srv/x", "{c}"]
+    assert out["parameters"]["c"] == {"type": "enum", "values": ["a", "b"]}
+    assert out["parameters"]["c"] is not raw["parameters"]["c"]
+
+
+def test_project_var_overrides_host_var() -> None:
+    d = good()
+    d["hosts"]["prod-host"]["vars"] = {"dir": "/host", "other": "/o"}
+    set_vars(d, dir="/proj")
+    action(d)["args"][3] = "${dir}${other}/x.log"
+    assert parse_policy(dump(d)).servers["prod"].actions["tail"].args[3] == "/proj/o/x.log"
+
+
+def test_host_actions_ignore_project_vars() -> None:
+    d = good()
+    host_act = tpl_action(d)
+    host_act["args"][3] = "${dir}/x.log"
+    d["hosts"]["prod-host"].update(vars={"dir": "/host"}, actions={"hlog": host_act})
+    set_vars(d, dir="/proj")
+    p = parse_policy(dump(d))
+    assert p.servers["prod"].actions["hlog"].args[3] == "/host/x.log"
+
+
+def test_host_action_cannot_see_project_only_var() -> None:
+    d = good()
+    host_act = tpl_action(d)
+    host_act["args"][3] = "${dir}/x.log"
+    d["hosts"]["prod-host"]["actions"] = {"hlog": host_act}
+    set_vars(d, dir="/proj")
+    assert "hosts.prod-host.actions.hlog.args[3]: undefined variable 'dir'" in errors_of(d)
+
+
+@pytest.mark.parametrize("value", ["{lines}", "${x}", "a}", ["ok", "{lines}"]])
+def test_var_value_with_braces_rejected(value: Any) -> None:
+    d = good()
+    set_vars(d, v=value, x="ok")
+    action(d)["args"][3] = "${v}"
+    errs = errors_of(d)
+    assert any(x.startswith("projects.prod.vars.v") and "contains a brace" in x for x in errs)
+
+
+def test_var_errors_named_and_sanitized() -> None:
+    d = good()
+    set_vars(d, s="/secret-value", lst=["secret-item"])
+    action(d)["args"][3] = "${lst}"
+    action(d)["executable"] = "/usr/bin/${s}"
+    u = d["projects"]["prod"]["actions"]["unit"]
+    u["parameters"]["unit"] = {"type": "enum", "values": "$s"}
+    errs = errors_of(d)
+    assert "projects.prod.actions.tail.args[3]: variable 'lst' must be a string" in errs
+    assert "projects.prod.actions.tail.executable: variables are not allowed here" in errs
+    assert "projects.prod.actions.unit.parameters.unit.values: variable 's' must be a list" in errs
+    assert not any("secret" in x for x in errs)
+
+
+def test_var_value_errors_name_path() -> None:
+    d = good()
+    set_vars(d, x="-rf", y=["ok", "a\nb"])
+    errs = errors_of(d)
+    assert "projects.prod.vars.x: starts with '-'" in errs
+    assert "projects.prod.vars.y[1]: contains control characters" in errs
+
+
+def test_undefined_enum_var_error() -> None:
+    d = good()
+    d["projects"]["prod"]["actions"]["unit"]["parameters"]["unit"] = {
+        "type": "enum",
+        "values": "$nope",
+    }
+    errs = errors_of(d)
+    assert errs == ["projects.prod.actions.unit.parameters.unit.values: undefined variable 'nope'"]
+
+
+def test_substituted_text_not_rescanned() -> None:
+    d = good()
+    set_vars(d, a="$", b="x")
+    action(d)["args"][3] = "/p/${a}{b}"
+    # "${a}" -> "$" gives "/p/${b}"; it is not re-scanned, so "{b}" stays a stray brace
+    assert any("stray brace" in x for x in errors_of(d))
+
+
+def test_unused_vars_accepted() -> None:
+    d = good()
+    d["hosts"]["prod-host"]["vars"] = {"h": "x"}
+    set_vars(d, p=["a"])
+    parse_policy(dump(d))
+
+
 def mutations() -> list[tuple[str, Any]]:
     def f(fn: Any) -> Any:
         def run(d: dict[str, Any]) -> None:
@@ -523,6 +716,44 @@ def mutations() -> list[tuple[str, Any]]:
         ("host_use_unknown_template", f(lambda d: d["hosts"]["prod-host"].update(use=["nope"]))),
         ("host_use_not_list", f(lambda d: d["hosts"]["prod-host"].update(use={}))),
         ("hosts_not_dict", f(lambda d: d.update(hosts=[]))),
+        ("var_undefined_arg", f(lambda d: action(d)["args"].__setitem__(3, "${nope}/x.log"))),
+        (
+            "var_undefined_enum",
+            f(lambda d: action(d).update(args=["{c}"], parameters={"c": ENUM_VAR})),
+        ),
+        (
+            "var_list_in_arg",
+            f(lambda d: (set_vars(d, c=["a"]), action(d)["args"].__setitem__(3, "${c}"))),
+        ),
+        (
+            "var_string_in_enum",
+            f(
+                lambda d: (
+                    set_vars(d, c="a"),
+                    action(d).update(args=["{c}"], parameters={"c": ENUM_VAR}),
+                )
+            ),
+        ),
+        (
+            "var_in_executable",
+            f(lambda d: (set_vars(d, b="/usr/bin"), action(d).update(executable="${b}/tail"))),
+        ),
+        (
+            "var_in_description",
+            f(lambda d: (set_vars(d, b="x"), action(d).update(description="Tail ${b}"))),
+        ),
+        ("var_value_dash", f(lambda d: set_vars(d, x="-rf"))),
+        ("var_value_dotdot", f(lambda d: set_vars(d, x="/a/../b"))),
+        ("var_value_newline", f(lambda d: set_vars(d, x="a\nb"))),
+        ("var_list_empty", f(lambda d: set_vars(d, x=[]))),
+        ("var_list_65", f(lambda d: set_vars(d, x=[f"v{i}" for i in range(65)]))),
+        ("var_bad_name", f(lambda d: set_vars(d, **{"1x": "a"}))),
+        ("var_value_not_string", f(lambda d: set_vars(d, x=5))),
+        ("var_list_item_not_string", f(lambda d: set_vars(d, x=["a", 5]))),
+        ("var_list_item_brace", f(lambda d: set_vars(d, x=["a", "{b}"]))),
+        ("vars_not_dict", f(lambda d: d["projects"]["prod"].update(vars=[]))),
+        ("host_vars_not_dict", f(lambda d: d["hosts"]["prod-host"].update(vars="x"))),
+        ("host_var_value_dash", f(lambda d: d["hosts"]["prod-host"].update(vars={"x": "-r"}))),
     ]
     for name in policy.DENYLIST_SAMPLES:
         cases.append(

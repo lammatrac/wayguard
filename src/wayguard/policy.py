@@ -32,7 +32,8 @@ MAX_ACTION_DESCRIPTION = 500
 MAX_ALIAS_LENGTH = 255
 MAX_ACTIONS_PER_PROJECT = 200
 
-_VAR_REF_RE = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]{0,63}$")
+VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]{0,63})\}")
+LIST_VAR_RE = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]{0,63})$")
 ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
 PARAM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9_.@:+][A-Za-z0-9_.@:+-]*$")
@@ -420,13 +421,16 @@ def _check_short_description(desc: object, path: str, errs: _Errors) -> None:
         errs.add(path, "must be a string without control characters, max 200")
 
 
+_VarScope = Mapping[str, str | tuple[str, ...]]
+
+
 @dataclass(frozen=True)
 class _Host:
     id: str
     ssh_alias: str
     description: str | None
     use: tuple[str, ...]
-    vars: Mapping[str, str | tuple[str, ...]]
+    vars: _VarScope
     actions: Mapping[str, Any]  # raw action dicts
 
 
@@ -492,7 +496,7 @@ def _parse_host(
         errs.add(path, "must be an object")
         return None
     before = len(errs.items)
-    _check_keys(raw, {"ssh_alias"}, {"description", "actions", "use"}, path, errs)
+    _check_keys(raw, {"ssh_alias"}, {"description", "actions", "use", "vars"}, path, errs)
     alias = raw.get("ssh_alias")
     if "ssh_alias" in raw:
         _check_alias(alias, f"{path}.ssh_alias", errs)
@@ -502,17 +506,18 @@ def _parse_host(
     use: tuple[str, ...] = ()
     if "use" in raw:
         use = _parse_use(raw["use"], templates or {}, f"{path}.use", errs)
+    host_vars = _parse_vars(raw["vars"], f"{path}.vars", errs) if "vars" in raw else {}
     actions: dict[str, Any] = {}
     if "actions" in raw:
         if isinstance(raw["actions"], dict):
             actions = dict(raw["actions"])
         else:
             errs.add(f"{path}.actions", "must be an object")
-    if len(errs.items) > before:
+    if len(errs.items) > before or host_vars is None:
         return None
     return _Host(
         id=hid, ssh_alias=str(alias), description=desc if isinstance(desc, str) else None,
-        use=use, vars={}, actions=actions,
+        use=use, vars=host_vars, actions=actions,
     )  # fmt: skip
 
 
@@ -533,7 +538,7 @@ def _parse_shared_parameters(raw: object, errs: _Errors) -> dict[str, Any]:
             and isinstance(spec.get("values"), str)
         ):
             if _check_keys(spec, {"type", "values"}, set(), ppath, errs):
-                if _VAR_REF_RE.match(spec["values"]):
+                if LIST_VAR_RE.match(spec["values"]):
                     shared[pid] = spec
                 else:
                     errs.add(f"{ppath}.values", "must be a list or a '$name' variable reference")
@@ -542,28 +547,111 @@ def _parse_shared_parameters(raw: object, errs: _Errors) -> dict[str, Any]:
     return shared
 
 
+def _parse_vars(raw: object, path: str, errs: _Errors) -> dict[str, str | tuple[str, ...]] | None:
+    """Parse a `vars` object. Values are author-fixed constants: a string or 1-64 strings."""
+    if not isinstance(raw, dict):
+        errs.add(path, "must be an object")
+        return None
+    before = len(errs.items)
+    out: dict[str, str | tuple[str, ...]] = {}
+    for name, val in raw.items():
+        vpath = f"{path}.{_safe_key(name)}"
+        if not PARAM_NAME_RE.match(name):
+            errs.add(vpath, "invalid variable name")
+        elif isinstance(val, str):
+            if _check_var_string(val, vpath, errs):
+                out[name] = val
+        elif isinstance(val, list) and 1 <= len(val) <= MAX_ENUM_VALUES:
+            ok = True
+            for i, item in enumerate(val):
+                if not isinstance(item, str):
+                    errs.add(f"{vpath}[{i}]", "must be a string")
+                    ok = False
+                elif not _check_var_string(item, f"{vpath}[{i}]", errs):
+                    ok = False
+            if ok:
+                out[name] = tuple(val)
+        else:
+            errs.add(vpath, f"must be a string or a list of 1-{MAX_ENUM_VALUES} strings")
+    return out if len(errs.items) == before else None
+
+
+def _check_var_string(value: str, path: str, errs: _Errors) -> bool:
+    # Braces are banned so a substituted value can never form an agent `{param}` or a `${var}`.
+    why = string_value_violation(value, MAX_STRING_LENGTH)
+    if why is None and ("{" in value or "}" in value):
+        why = "contains a brace"
+    if why:
+        errs.add(path, why)
+        return False
+    return True
+
+
 def _resolve_action(
     raw: object,
-    scope: Mapping[str, str | tuple[str, ...]],
+    scope: _VarScope,
     ctx: _Ctx,
     path: str,
     errs: _Errors,
 ) -> object:
-    """Inline shared-parameter references (Task 3); variables are added in Task 5."""
-    if not isinstance(raw, dict) or not isinstance(raw.get("parameters"), dict):
+    """Inline shared parameters, `"$var"` enum values and `${var}` in args.
+
+    Never mutates `raw`: template and host action dicts are shared by every project
+    that expands them, and each project may resolve them differently.
+    """
+    if not isinstance(raw, dict):
         return raw
-    params: dict[str, Any] = {}
-    for pname, pval in raw["parameters"].items():
-        if isinstance(pval, str):
-            if pval in ctx.shared:
-                pval = copy.deepcopy(ctx.shared[pval])
-            else:
-                errs.add(
-                    f"{path}.parameters.{_safe_key(pname)}",
-                    f"unknown shared parameter '{_safe_key(pval)}'",
-                )
-        params[pname] = pval
-    return {**raw, "parameters": params}
+    out: dict[str, Any] = dict(raw)
+    for key in ("executable", "description"):
+        if isinstance(raw.get(key), str) and "${" in raw[key]:
+            errs.add(f"{path}.{key}", "variables are not allowed here")
+    if isinstance(raw.get("parameters"), dict):
+        params: dict[str, Any] = {}
+        for pname, pval in raw["parameters"].items():
+            ppath = f"{path}.parameters.{_safe_key(pname)}"
+            if isinstance(pval, str):
+                if pval in ctx.shared:
+                    pval = ctx.shared[pval]
+                else:
+                    errs.add(ppath, f"unknown shared parameter '{_safe_key(pval)}'")
+            if isinstance(pval, dict):
+                pval = copy.deepcopy(pval)
+                if pval.get("type") == "enum" and isinstance(pval.get("values"), str):
+                    m = LIST_VAR_RE.match(pval["values"])
+                    if m:
+                        var = m.group(1)
+                        val = scope.get(var)
+                        if val is None:
+                            errs.add(f"{ppath}.values", f"undefined variable '{var}'")
+                        elif not isinstance(val, tuple):
+                            errs.add(f"{ppath}.values", f"variable '{var}' must be a list")
+                        else:
+                            pval["values"] = list(val)
+            params[pname] = pval
+        out["parameters"] = params
+    if isinstance(raw.get("args"), list):
+        out["args"] = [
+            _substitute(a, scope, f"{path}.args[{i}]", errs) if isinstance(a, str) else a
+            for i, a in enumerate(raw["args"])
+        ]
+    return out
+
+
+def _substitute(arg: str, scope: _VarScope, path: str, errs: _Errors) -> str:
+    """Replace each `${var}` with a string variable in one pass (no re-scan)."""
+
+    def one(m: re.Match[str]) -> str:
+        var = m.group(1)
+        val = scope.get(var)
+        if val is None:
+            errs.add(path, f"undefined variable '{var}'")
+        elif not isinstance(val, str):
+            errs.add(path, f"variable '{var}' must be a string")
+        else:
+            return val
+        return m.group(0)
+
+    return VAR_REF_RE.sub(one, arg)
 
 
 def _expand_project(
@@ -577,7 +665,9 @@ def _expand_project(
         errs.add(path, "must be an object")
         return None
     before = len(errs.items)
-    _check_keys(raw, {"enabled", "host"}, {"description", "actions", "disable", "use"}, path, errs)
+    _check_keys(
+        raw, {"enabled", "host"}, {"description", "actions", "disable", "use", "vars"}, path, errs
+    )
     if "enabled" in raw and not isinstance(raw["enabled"], bool):
         errs.add(f"{path}.enabled", "must be a boolean")
     host: _Host | None = None
@@ -603,25 +693,35 @@ def _expand_project(
             disable = raw["disable"]
         else:
             errs.add(f"{path}.disable", "must be a list of strings")
-    if host is None or len(errs.items) > before:
+    proj_vars = _parse_vars(raw["vars"], f"{path}.vars", errs) if "vars" in raw else {}
+    if host is None or proj_vars is None or len(errs.items) > before:
         return None
+    # Host actions see host vars only; project actions see host vars overlaid by project vars.
+    project_scope = {**host.vars, **proj_vars}
 
     hpath = f"hosts.{_safe_key(host.id)}"
-    sources: list[tuple[str, Mapping[str, Any]]] = []
-    sources += [(f"{hpath}.use.{_safe_key(t)}.actions", ctx.templates[t]) for t in host.use]
-    sources.append((f"{hpath}.actions", host.actions))
-    sources += [(f"{path}.use.{_safe_key(t)}.actions", ctx.templates[t]) for t in use]
-    sources.append((f"{path}.actions", raw_actions))
+    sources: list[tuple[str, Mapping[str, Any], _VarScope]] = []
+    sources += [
+        (f"{hpath}.use.{_safe_key(t)}.actions", ctx.templates[t], host.vars) for t in host.use
+    ]
+    sources.append((f"{hpath}.actions", host.actions, host.vars))
+    sources += [
+        (f"{path}.use.{_safe_key(t)}.actions", ctx.templates[t], project_scope) for t in use
+    ]
+    sources.append((f"{path}.actions", raw_actions, project_scope))
     first: dict[str, str] = {}
     actions: dict[str, Action] = {}
-    for base, group in sources:
+    for base, group, scope in sources:
         for aid, araw in group.items():
             apath = f"{base}.{_safe_key(aid)}"
             if aid in first:
                 errs.add(apath, f"duplicate action id (also defined in {first[aid]})")
                 continue
             first[aid] = apath
-            resolved = _resolve_action(araw, host.vars, ctx, apath, errs)
+            n_errs = len(errs.items)
+            resolved = _resolve_action(araw, scope, ctx, apath, errs)
+            if len(errs.items) > n_errs:
+                continue  # resolution failed; v1 checks on a half-resolved dict only add noise
             a = _parse_action(aid, resolved, apath, ctx.defaults, errs)
             if a:
                 actions[aid] = a
