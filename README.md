@@ -82,7 +82,7 @@ The agent sees five tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `list_servers` | Enabled projects (each on a host), by project ID. |
+| `list_servers` | Enabled projects (each on a host), by project ID, plus the policy `validation` state. |
 | `list_actions` | Actions and parameter limits for one server. |
 | `run_action` | Runs one named action; returns bounded output and a `status` (`ok`, `denied`, `timeout`, `auth_error`, …). |
 | `propose_action` | Requests a new action for human review; never executes anything. |
@@ -417,7 +417,7 @@ Proposal records must be inert data. Never load a proposal as policy or execute 
 
 No arguments. Returns policy schema version, validation status, load time, and whether enforcement is `local-policy-only` or a separately configured remote-gateway mode. It must not return secrets or full configuration content.
 
-Fields: `schema_version` (1), `validation` (`valid` or `invalid`), `errors` (sanitized `"<json.path>: <reason>"` strings, empty when valid), `loaded_at` (UTC timestamp or `null`), `policy_changed_since_load` (true if the policy file changed on disk since this server loaded it; restart the server to apply changes) and `enforcement` (always `local-policy-only` in v1). If the policy is missing, unreadable, has unsafe permissions or fails validation at startup, the server runs in **deny-all mode**: it still starts, `list_servers` is empty, every `run_action` is denied with `policy_invalid`, and `get_policy_status` reports why. `propose_action` still works.
+Fields: `schema_version` (2, the policy schema version), `validation` (`valid` or `invalid`), `errors` (sanitized `"<json.path>: <reason>"` strings, empty when valid), `loaded_at` (UTC timestamp or `null`), `policy_changed_since_load` (true if the policy file changed on disk since this server loaded it; restart the server to apply changes) and `enforcement` (always `local-policy-only` in v1). If the policy is missing, unreadable, has unsafe permissions or fails validation at startup, the server runs in **deny-all mode**: it still starts, `list_servers` is empty with `validation: "invalid"` and a `reason` pointing to `get_policy_status`, every `run_action` is denied with `policy_invalid`, and `get_policy_status` reports why. `propose_action` still works.
 
 Do not expose policy editing, approval, command execution by string, arbitrary file read, or raw SSH tools through MCP.
 

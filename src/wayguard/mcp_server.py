@@ -24,7 +24,7 @@ from wayguard.validation import RequestDenied
 log = logging.getLogger("wayguard")
 
 ENFORCEMENT = "local-policy-only"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = policy_mod.SCHEMA_VERSION
 TOOL_NAMES = ("list_servers", "list_actions", "run_action", "propose_action", "get_policy_status")
 PERMISSION_ERRORS = ["policy: file is missing, unreadable or has unsafe permissions"]
 
@@ -82,8 +82,9 @@ def tool_definitions(policy: policy_mod.Policy | None = None) -> list[types.Tool
             name="list_servers",
             description=(
                 "List enabled projects (id, optional description, action count); each "
-                "project lives on a server. Start here for any remote server diagnostic "
-                "instead of running ssh in a shell."
+                "project lives on a server. If validation is invalid the list is empty "
+                "because the policy failed to load, not because none exist. Start here "
+                "for any remote server diagnostic instead of running ssh in a shell."
             ),
             inputSchema=_obj({}, []),
         ),
@@ -236,7 +237,18 @@ class WayguardService:
                     e["description"] = s.description
                 e["action_count"] = len(s.actions)
                 servers.append(e)
-        return _result({"servers": servers, "enforcement": ENFORCEMENT})
+        out: dict[str, Any] = {
+            "servers": servers,
+            "validation": "valid" if self.policy else "invalid",
+        }
+        if self.policy is None:
+            # An empty list must not read as "no servers configured".
+            out["reason"] = (
+                "policy is invalid, so all actions are denied; "
+                "call get_policy_status for the errors"
+            )
+        out["enforcement"] = ENFORCEMENT
+        return _result(out)
 
     def _list_actions(self, arguments: object) -> types.CallToolResult:
         bad = _exact_args(arguments, {"server_id"}, {"server_id"})

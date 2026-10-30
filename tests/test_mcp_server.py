@@ -15,6 +15,7 @@ from mcp.types import CallToolResult
 
 from tests.test_policy import add_server, dump, good
 from wayguard import config, mcp_server
+from wayguard import policy as policy_mod
 from wayguard.command import discover_ssh
 
 TOOLS = {"list_servers", "list_actions", "run_action", "propose_action", "get_policy_status"}
@@ -93,6 +94,7 @@ def test_listing_never_leaks_alias(tmp_path: Path) -> None:
     for o in outs:
         assert "prod-debug" not in o
     ls = json.loads(outs[0])
+    assert ls["validation"] == "valid" and "reason" not in ls
     assert ls["servers"] == [{"server_id": "prod", "description": "Production", "action_count": 2}]
     acts = json.loads(outs[2])["actions"]
     tail = next(a for a in acts if a["action_id"] == "tail")
@@ -106,7 +108,7 @@ def test_status_valid_and_enforcement(tmp_path: Path) -> None:
     assert st["validation"] == "valid" and st["errors"] == []
     assert st["enforcement"] == "local-policy-only"
     assert st["policy_changed_since_load"] is False
-    assert st["schema_version"] == 1 and st["loaded_at"]
+    assert st["schema_version"] == policy_mod.SCHEMA_VERSION == 2 and st["loaded_at"]
 
 
 def test_list_actions_denies_unknown_and_disabled(tmp_path: Path) -> None:
@@ -184,6 +186,8 @@ def test_deny_all_mode(tmp_path: Path) -> None:
     assert o["tools"] == TOOLS
     assert o["status"]["validation"] == "invalid" and o["status"]["errors"]
     assert o["servers"]["servers"] == []
+    assert o["servers"]["validation"] == "invalid"
+    assert "get_policy_status" in o["servers"]["reason"]
     assert o["actions"]["status"] == "denied" and o["actions"]["reason_code"] == "policy_invalid"
     assert o["run"]["status"] == "denied" and o["run"]["reason_code"] == "policy_invalid"
     assert o["prop"]["status"] == "recorded"
