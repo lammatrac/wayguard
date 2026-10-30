@@ -227,6 +227,20 @@
     },
     "nginx": {
       "description": "Nginx logs and config test. Needs vars nginx_error_log, nginx_access_log, nginx_rotated_logs, nginx_rotated_access_logs",
+      "vars": {
+        "nginx_error_log": "/var/log/nginx/error.log",
+        "nginx_access_log": "/var/log/nginx/access.log",
+        "nginx_rotated_logs": [
+          "/var/log/nginx/error.log.2.gz",
+          "/var/log/nginx/error.log.3.gz",
+          "/var/log/nginx/access.log.2.gz",
+          "/var/log/nginx/access.log.3.gz"
+        ],
+        "nginx_rotated_access_logs": [
+          "/var/log/nginx/access.log.2.gz",
+          "/var/log/nginx/access.log.3.gz"
+        ]
+      },
       "actions": {
         "nginx_error_tail": {
           "description": "Last N lines of the Nginx error log",
@@ -368,6 +382,10 @@
     },
     "apache": {
       "description": "Apache logs and config checks. Needs vars apache_error_log, apache_access_log",
+      "vars": {
+        "apache_error_log": "/var/log/apache2/error.log",
+        "apache_access_log": "/var/log/apache2/access.log"
+      },
       "actions": {
         "apache_error_tail": {
           "description": "Last N lines of the Apache error log (RHEL: /var/log/httpd/error_log)",
@@ -437,6 +455,10 @@
     },
     "php-fpm": {
       "description": "PHP-FPM logs. Needs vars php_fpm_error_log, php_fpm_slow_log",
+      "vars": {
+        "php_fpm_error_log": "/var/log/php8.2-fpm.log",
+        "php_fpm_slow_log": "/var/log/php8.2-fpm-slow.log"
+      },
       "actions": {
         "php_fpm_error_tail": {
           "description": "Last N lines of the PHP-FPM error log",
@@ -589,23 +611,7 @@
           "apache2",
           "php8.2-fpm",
           "docker"
-        ],
-        "nginx_error_log": "/var/log/nginx/error.log",
-        "nginx_access_log": "/var/log/nginx/access.log",
-        "nginx_rotated_logs": [
-          "/var/log/nginx/error.log.2.gz",
-          "/var/log/nginx/error.log.3.gz",
-          "/var/log/nginx/access.log.2.gz",
-          "/var/log/nginx/access.log.3.gz"
-        ],
-        "nginx_rotated_access_logs": [
-          "/var/log/nginx/access.log.2.gz",
-          "/var/log/nginx/access.log.3.gz"
-        ],
-        "php_fpm_error_log": "/var/log/php8.2-fpm.log",
-        "php_fpm_slow_log": "/var/log/php8.2-fpm-slow.log",
-        "apache_error_log": "/var/log/apache2/error.log",
-        "apache_access_log": "/var/log/apache2/access.log"
+        ]
       }
     }
   },

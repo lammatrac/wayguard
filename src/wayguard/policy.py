@@ -450,14 +450,20 @@ class _Host:
 
 
 @dataclass(frozen=True)
+class _Template:
+    actions: Mapping[str, Any]  # raw action dicts
+    vars: _VarScope  # defaults seen only by this template's actions
+
+
+@dataclass(frozen=True)
 class _Ctx:
     defaults: Defaults | None
     shared: Mapping[str, Any]
-    templates: Mapping[str, Mapping[str, Any]]
+    templates: Mapping[str, _Template]
 
 
 def _parse_use(
-    raw: object, templates: Mapping[str, Mapping[str, Any]], path: str, errs: _Errors
+    raw: object, templates: Mapping[str, _Template], path: str, errs: _Errors
 ) -> tuple[str, ...]:
     if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
         errs.add(path, "must be a list of template ids")
@@ -472,12 +478,12 @@ def _parse_use(
     return tuple(raw)
 
 
-def _parse_templates(raw: object, errs: _Errors) -> dict[str, Mapping[str, Any]]:
+def _parse_templates(raw: object, errs: _Errors) -> dict[str, _Template]:
     path = "templates"
     if not isinstance(raw, dict):
         errs.add(path, "must be an object")
         return {}
-    templates: dict[str, Mapping[str, Any]] = {}
+    templates: dict[str, _Template] = {}
     for tid, traw in raw.items():
         tpath = f"{path}.{_safe_key(tid)}"
         if not ID_RE.match(tid):
@@ -487,14 +493,15 @@ def _parse_templates(raw: object, errs: _Errors) -> dict[str, Mapping[str, Any]]
             errs.add(tpath, "must be an object")
             continue
         before = errs.count
-        _check_keys(traw, {"actions"}, {"description"}, tpath, errs)
+        _check_keys(traw, {"actions"}, {"description", "vars"}, tpath, errs)
         if "description" in traw:
             _check_short_description(traw["description"], f"{tpath}.description", errs)
         if "actions" in traw and not isinstance(traw["actions"], dict):
             errs.add(f"{tpath}.actions", "must be an object")
+        tvars = _parse_vars(traw["vars"], f"{tpath}.vars", errs) if "vars" in traw else {}
         actions = traw.get("actions")
-        if errs.count == before and isinstance(actions, dict):
-            templates[tid] = dict(actions)
+        if errs.count == before and isinstance(actions, dict) and tvars is not None:
+            templates[tid] = _Template(actions=dict(actions), vars=tvars)
     return templates
 
 
@@ -502,7 +509,7 @@ def _parse_host(
     hid: str,
     raw: object,
     errs: _Errors,
-    templates: Mapping[str, Mapping[str, Any]] | None = None,
+    templates: Mapping[str, _Template] | None = None,
 ) -> _Host | None:
     path = f"hosts.{_safe_key(hid)}"
     if not ID_RE.match(hid):
@@ -744,16 +751,20 @@ def _expand_project(
     if host is None or proj_vars is None or errs.count > before:
         return None
     # Host actions see host vars only; project actions see host vars overlaid by project vars.
+    # A template's own vars are defaults beneath either scope, for its actions only.
     project_scope = {**host.vars, **proj_vars}
+    tpls = ctx.templates
 
     hpath = f"hosts.{_safe_key(host.id)}"
     sources: list[tuple[str, Mapping[str, Any], _VarScope]] = []
     sources += [
-        (f"{hpath}.use.{_safe_key(t)}.actions", ctx.templates[t], host.vars) for t in host.use
+        (f"{hpath}.use.{_safe_key(t)}.actions", tpls[t].actions, {**tpls[t].vars, **host.vars})
+        for t in host.use
     ]
     sources.append((f"{hpath}.actions", host.actions, host.vars))
     sources += [
-        (f"{path}.use.{_safe_key(t)}.actions", ctx.templates[t], project_scope) for t in use
+        (f"{path}.use.{_safe_key(t)}.actions", tpls[t].actions, {**tpls[t].vars, **project_scope})
+        for t in use
     ]
     sources.append((f"{path}.actions", raw_actions, project_scope))
     first: dict[str, str] = {}
@@ -781,7 +792,7 @@ def _expand_project(
         # Project-scope actions: the project's own templates and actions. A project var
         # nothing there references is most likely a misspelling that would silently let
         # the host's value win, so it is an error (host vars may stay unused).
-        groups = [ctx.templates[t] for t in use if t in ctx.templates] + [raw_actions]
+        groups = [ctx.templates[t].actions for t in use if t in ctx.templates] + [raw_actions]
         refs = set().union(*(_var_refs(g, ctx.shared) for g in groups))
         for name in proj_vars:
             if name not in refs:
@@ -829,6 +840,12 @@ def parse_policy(data: bytes, path: Path | None = None) -> Policy:
                 if h:
                     hosts[hid] = h
     shared = _parse_shared_parameters(doc["parameters"], errs) if "parameters" in doc else {}
+    for tid, tpl in templates.items():
+        # Like a project var, an unreferenced default is most likely a misspelling.
+        refs = _var_refs(tpl.actions, shared)
+        for name in tpl.vars:
+            if name not in refs:
+                errs.add(f"templates.{_safe_key(tid)}.vars.{_safe_key(name)}", "unused variable")
     ctx = _Ctx(defaults=defaults, shared=shared, templates=templates)
     servers: dict[str, Server] = {}
     if "projects" in doc:

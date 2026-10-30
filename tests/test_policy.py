@@ -387,8 +387,8 @@ def test_template_vars_per_project_and_raw_not_mutated(monkeypatch: pytest.Monke
     assert p.servers["a"].actions["log"].args[3] == "/a/debug.log"
     assert p.servers["b"].actions["log"].args[3] == "/b/debug.log"
     assert p.servers["a"].actions["hlog"].args[3] == "/srv/host/host.log"
-    assert tpls["t"]["log"] == before["templates"]["t"]["actions"]["log"]
-    assert tpls["h"]["hlog"] == before["templates"]["h"]["actions"]["hlog"]
+    assert tpls["t"].actions["log"] == before["templates"]["t"]["actions"]["log"]
+    assert tpls["h"].actions["hlog"] == before["templates"]["h"]["actions"]["hlog"]
 
 
 def test_resolve_action_does_not_mutate_input() -> None:
@@ -606,6 +606,85 @@ def test_two_templates_same_action_id_collide() -> None:
         "projects.prod.use.t2.actions.disk: duplicate action id"
         " (also defined in projects.prod.use.t1.actions.disk)"
     ) in errs
+
+
+def dir_template(d: dict[str, Any], **tvars: Any) -> None:
+    """Template `t` with one action `log` reading `${dir}/x.log`, defaults `tvars`."""
+    t = tpl_action(d)
+    t["args"][3] = "${dir}/x.log"
+    d["templates"] = {"t": {"vars": tvars, "actions": {"log": t}}}
+
+
+def test_template_default_var_used_when_unset() -> None:
+    d = good()
+    dir_template(d, dir="/tpl")
+    d["projects"]["prod"]["use"] = ["t"]
+    assert parse_policy(dump(d)).servers["prod"].actions["log"].args[3] == "/tpl/x.log"
+
+
+def test_template_default_overridden_by_host_then_project() -> None:
+    d = good()
+    dir_template(d, dir="/tpl")
+    d["hosts"]["prod-host"]["vars"] = {"dir": "/host"}
+    d["projects"]["prod"]["use"] = ["t"]
+    d["projects"]["b"] = {"enabled": True, "host": "prod-host", "use": ["t"], "vars": {"dir": "/b"}}
+    p = parse_policy(dump(d))
+    assert p.servers["prod"].actions["log"].args[3] == "/host/x.log"
+    assert p.servers["b"].actions["log"].args[3] == "/b/x.log"
+
+
+def test_host_template_default_overridden_by_host_not_project() -> None:
+    d = good()
+    dir_template(d, dir="/tpl")
+    d["hosts"]["prod-host"]["use"] = ["t"]
+    d["projects"]["b"] = {"enabled": True, "host": "prod-host"}
+    d["hosts"]["other"] = {"ssh_alias": "o", "use": ["t"], "vars": {"dir": "/host"}}
+    d["projects"]["c"] = {"enabled": True, "host": "other"}
+    p = parse_policy(dump(d))
+    assert p.servers["b"].actions["log"].args[3] == "/tpl/x.log"
+    assert p.servers["c"].actions["log"].args[3] == "/host/x.log"
+
+
+def test_template_default_list_var_becomes_enum() -> None:
+    d = good()
+    t = tpl_action(d)
+    t["args"] = ["status", "{unit}"]
+    t["parameters"] = {"unit": {"type": "enum", "values": "$units"}}
+    d["templates"] = {"t": {"vars": {"units": ["nginx", "php"]}, "actions": {"st": t}}}
+    d["projects"]["prod"]["use"] = ["t"]
+    a = parse_policy(dump(d)).servers["prod"].actions["st"]
+    assert a.parameters["unit"].values == ("nginx", "php")
+
+
+def test_template_default_not_visible_outside_its_template() -> None:
+    d = good()
+    dir_template(d, dir="/tpl")
+    d["projects"]["prod"]["use"] = ["t"]
+    action(d)["args"][3] = "${dir}/y.log"
+    assert "projects.prod.actions.tail.args[3]: undefined variable 'dir'" in errors_of(d)
+
+
+def test_unused_template_var_rejected() -> None:
+    d = good()
+    dir_template(d, dir="/tpl", dri="/typo")
+    assert "templates.t.vars.dri: unused variable" in errors_of(d)
+
+
+def test_template_var_used_through_shared_enum_accepted() -> None:
+    d = good()
+    d["parameters"] = {"cs": ENUM_VAR}
+    t = tpl_action(d)
+    t["args"] = ["logs", "{c}"]
+    t["parameters"] = {"c": "cs"}
+    d["templates"] = {"t": {"vars": {"c": ["app"]}, "actions": {"logs": t}}}
+    d["projects"]["prod"]["use"] = ["t"]
+    assert parse_policy(dump(d)).servers["prod"].actions["logs"].parameters["c"].values == ("app",)
+
+
+def test_invalid_template_var_rejected() -> None:
+    d = good()
+    dir_template(d, dir="/a{b}")
+    assert "templates.t.vars.dir: contains a brace" in errors_of(d)
 
 
 def _over_cap(d: dict[str, Any]) -> dict[str, Any]:
