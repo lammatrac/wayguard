@@ -104,6 +104,7 @@ class Server:
     ssh_alias: str  # never expose via MCP/CLI listings
     description: str | None
     actions: Mapping[str, Action]
+    ssh_jump: str | None = None  # jump host alias for `ssh -J`; never expose either
 
 
 @dataclass(frozen=True)
@@ -443,6 +444,7 @@ _VarScope = Mapping[str, str | tuple[str, ...]]
 class _Host:
     id: str
     ssh_alias: str
+    ssh_jump: str | None
     description: str | None
     use: tuple[str, ...]
     vars: _VarScope
@@ -519,10 +521,15 @@ def _parse_host(
         errs.add(path, "must be an object")
         return None
     before = errs.count
-    _check_keys(raw, {"ssh_alias"}, {"description", "actions", "use", "vars"}, path, errs)
+    _check_keys(
+        raw, {"ssh_alias"}, {"ssh_jump", "description", "actions", "use", "vars"}, path, errs
+    )
     alias = raw.get("ssh_alias")
     if "ssh_alias" in raw:
         _check_alias(alias, f"{path}.ssh_alias", errs)
+    jump = raw.get("ssh_jump")
+    if "ssh_jump" in raw:
+        _check_alias(jump, f"{path}.ssh_jump", errs)
     desc = raw.get("description")
     if "description" in raw:
         _check_short_description(desc, f"{path}.description", errs)
@@ -539,7 +546,8 @@ def _parse_host(
     if errs.count > before or host_vars is None:
         return None
     return _Host(
-        id=hid, ssh_alias=str(alias), description=desc if isinstance(desc, str) else None,
+        id=hid, ssh_alias=str(alias), ssh_jump=jump if isinstance(jump, str) else None,
+        description=desc if isinstance(desc, str) else None,
         use=use, vars=host_vars, actions=actions,
     )  # fmt: skip
 
@@ -804,6 +812,7 @@ def _expand_project(
     return Server(
         id=pid, enabled=raw.get("enabled") is True, ssh_alias=host.ssh_alias,
         description=desc if isinstance(desc, str) else None, actions=actions,
+        ssh_jump=host.ssh_jump,
     )  # fmt: skip
 
 

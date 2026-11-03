@@ -79,12 +79,19 @@ def add_server(
     d["projects"][sid] = proj
 
 
+def test_host_ssh_jump_reaches_every_project_on_the_host() -> None:
+    d = good()
+    d["hosts"]["prod-host"]["ssh_jump"] = "bastion"
+    assert parse_policy(dump(d)).servers["prod"].ssh_jump == "bastion"
+
+
 def test_valid_policy_builds_model() -> None:
     p = parse_policy(dump(good()))
     assert p.defaults.timeout_seconds == 15
     assert p.defaults.max_concurrent_actions == 2
     s = p.servers["prod"]
     assert s.enabled and s.ssh_alias == "prod-debug" and s.description == "Production"
+    assert s.ssh_jump is None
     a = s.actions["tail"]
     assert a.timeout_seconds == 10 and a.max_output_bytes == 1000
     assert a.parameters["lines"].type == "integer"
@@ -767,6 +774,11 @@ def mutations() -> list[tuple[str, Any]]:
         ("alias_space", f(lambda d: host(d).update(ssh_alias="a b"))),
         ("alias_meta", f(lambda d: host(d).update(ssh_alias="a;b"))),
         ("alias_ctrl", f(lambda d: host(d).update(ssh_alias="a\nb"))),
+        ("jump_dash", f(lambda d: host(d).update(ssh_jump="-oProxyCommand=x"))),
+        ("jump_empty", f(lambda d: host(d).update(ssh_jump=""))),
+        ("jump_space", f(lambda d: host(d).update(ssh_jump="a b"))),
+        ("jump_chain", f(lambda d: host(d).update(ssh_jump="a,b"))),
+        ("jump_nonstr", f(lambda d: host(d).update(ssh_jump=1))),
         ("risk_write", f(lambda d: action(d).update(risk="write"))),
         ("timeout_zero", f(lambda d: d["defaults"].update(timeout_seconds=0))),
         ("timeout_121", f(lambda d: d["defaults"].update(timeout_seconds=121))),

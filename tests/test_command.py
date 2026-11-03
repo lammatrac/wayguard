@@ -130,6 +130,22 @@ def test_build_rejects_unsafe_alias(alias: str) -> None:
         build_command(bad, SSH)
 
 
+def test_jump_host_adds_dash_j_before_double_dash() -> None:
+    v = vr("tail", lines=1)
+    jumped = dataclasses.replace(v, server=dataclasses.replace(v.server, ssh_jump="bastion"))
+    argv = build_command(jumped, SSH).argv
+    assert argv[-5:-2] == ["-J", "bastion", "--"] and argv[-2] == "prod-debug"
+    assert "-J" not in build_command(v, SSH).argv
+
+
+@pytest.mark.parametrize("jump", ["-oProxyCommand=x", "a b", "a;b", "a,b", "", "a\nb"])
+def test_build_rejects_unsafe_jump(jump: str) -> None:
+    v = vr("tail", lines=1)
+    bad = dataclasses.replace(v, server=dataclasses.replace(v.server, ssh_jump=jump))
+    with pytest.raises(CommandBuildError):
+        build_command(bad, SSH)
+
+
 def test_build_rejects_bool_and_missing_param() -> None:
     v = vr("tail", lines=1)
     with pytest.raises(CommandBuildError):

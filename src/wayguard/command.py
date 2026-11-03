@@ -115,6 +115,17 @@ def build_argv(ssh_path: str, server: Server, action: Action, remote_command: st
     alias = server.ssh_alias
     if len(alias) > MAX_ALIAS_LENGTH or ALIAS_RE.fullmatch(alias) is None:
         raise CommandBuildError("ssh alias is not allowed")
+    jump = server.ssh_jump
+    jump_args: list[str] = []
+    if jump is not None:
+        if (
+            not jump
+            or len(jump) > MAX_ALIAS_LENGTH
+            or jump.startswith("-")
+            or ALIAS_RE.fullmatch(jump) is None
+        ):
+            raise CommandBuildError("ssh jump alias is not allowed")
+        jump_args = ["-J", jump]
     connect_timeout = min(MAX_CONNECT_TIMEOUT, action.timeout_seconds)
     if connect_timeout < 1:
         raise CommandBuildError("timeout must be positive")
@@ -131,6 +142,7 @@ def build_argv(ssh_path: str, server: Server, action: Action, remote_command: st
         "-o", "ControlPath=none",
         "-o", "RequestTTY=no",
         "-o", f"ConnectTimeout={connect_timeout}",
+        *jump_args,
         "--", alias, remote_command,
     ]  # fmt: skip
 
