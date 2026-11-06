@@ -324,7 +324,7 @@ Policy v2 lets you write each shared thing once. Shared **parameters** define a 
 - **Top level.** `version` (must be `2`), `defaults` and `hosts` and `projects` are required (`hosts` and `projects` may be `{}`). `parameters` and `templates` are optional.
 - **`parameters`** (optional): shared parameter specs keyed by id. An action uses one by giving the id string as the value of its parameter, as in `"lines": "lines"`. The key is the local name that `{lines}` in `args` refers to, so `"rows": "lines"` is also legal. An unknown shared parameter id is an error.
 - **`templates`** (optional): `{id: {description?, vars?, actions}}`. Template actions are written exactly like inline actions and are expanded once per project that uses the template. `vars` holds default values for the variables the template's actions reference, so values that are the same everywhere (such as distribution default log paths) are written once for every host.
-- **`hosts`**: one entry per machine. Keys: `ssh_alias` (required), `ssh_jump` (a jump host alias, passed as `ssh -J <ssh_jump>`), `description`, `use` (template ids), `vars` and `actions`. SSH aliases and jump hosts are never exposed to the agent. Host and template ids may appear in validation error paths (for example in `get_policy_status`).
+- **`hosts`**: one entry per machine. Keys: `ssh_alias` (required), `description`, `use` (template ids), `vars` and `actions`. SSH aliases are never exposed to the agent. Host and template ids may appear in validation error paths (for example in `get_policy_status`).
 - **`projects`**: one entry per project on a host. Keys: `enabled` and `host` (both required), `description`, `use`, `vars`, `actions` and `disable` (a list of action ids to remove). Each project becomes one entry in `list_servers`, keyed by the project id, with the host's actions plus its own. A disabled project is not listed but is still fully validated.
 
 ### Policy semantics
@@ -333,7 +333,7 @@ Identifiers and structure:
 
 - Keys of `parameters`, `templates`, `hosts`, `projects` and actions are stable identifiers matching `[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}`.
 - `description` on a host, project or template is optional (at most 200 characters). A project's description is returned by `list_servers`.
-- `ssh_alias` and `ssh_jump` must each be a single valid alias string. They must not start with `-`, contain whitespace, commas (no jump chains) or command syntax. MCP input must never override them. The jump connection uses its own `~/.ssh/config` entry; the `-o` hardening options apply to the target connection.
+- `ssh_alias` must be a single valid alias string. It must not start with `-`, contain whitespace, or contain command syntax. MCP input must never override it.
 - Each project is expanded in this order: host `use` templates (in order), host `actions`, project `use` templates, project `actions`, then `disable`. Defining the same action id twice in one project is an error, and so is listing a template in both the host's and the project's `use`. To replace a template action, `disable` it and define a new id. `disable` naming an action the project does not have is an error. Unknown template, host, action or shared-parameter references are errors. A project may have at most 200 actions after expansion.
 
 Placeholders and variables (three different things):
